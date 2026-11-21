@@ -1,0 +1,221 @@
+diff --git a/app.py b/app.py
+index 8b38ea9..d272167 100644
+--- a/app.py
++++ b/app.py
+@@ -6080,6 +6080,28 @@ async def process_estimate(req: EstimateRequest, request: Request):
+         balance.get("plan"), minutes, balance["remaining"], processed_before)}
+ 
+ 
++def _parse_twitch_vod_ref(vod_url, offset):
++    """``(vod_url, "<offset>")`` for an uploaded VOD stretch, None when absent.
++
++    400 on a link that is not a ``twitch.tv/videos/<id>`` VOD or an offset
++    that is not a non-negative number of seconds.
++    """
++    if vod_url in (None, ""):
++        return None
++    import twitch_signals
++    vod_url = str(vod_url).strip()
++    if not twitch_signals.parse_vod_id(vod_url):
++        raise HTTPException(status_code=400,
++                            detail="twitch_vod_url must be a twitch.tv/videos/<id> link.")
++    try:
++        start = float(offset) if offset not in (None, "") else 0.0
++    except (TypeError, ValueError):
++        raise HTTPException(status_code=400, detail="twitch_vod_offset must be seconds.")
++    if not (start >= 0.0) or start == float("inf"):
++        raise HTTPException(status_code=400, detail="twitch_vod_offset must be seconds.")
++    return vod_url, f"{start:.3f}"
++
++
+ @app.post("/api/process")
+ async def process_endpoint(
+     request: Request,
+@@ -6102,6 +6124,8 @@ async def process_endpoint(
+     max_minutes: Optional[str] = Form(None),
+     source_start: Optional[str] = Form(None),
+     source_end: Optional[str] = Form(None),
++    twitch_vod_url: Optional[str] = Form(None),
++    twitch_vod_offset: Optional[str] = Form(None),
+ ):
+     api_key = await resolve_gemini(request)
+     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
+@@ -6136,6 +6160,13 @@ async def process_endpoint(
+         max_minutes = body.get("max_minutes")
+         source_start = body.get("source_start")
+         source_end = body.get("source_end")
++        twitch_vod_url = body.get("twitch_vod_url")
++        twitch_vod_offset = body.get("twitch_vod_offset")
++
++    # A file that is a stretch of a Twitch VOD the caller downloaded itself:
++    # name the VOD (and where the file starts in it) so the job still gets the
++    # viewer-clip signal a VOD URL job has (twitch_signals.viewer_clips_for_stretch).
++    vod_ref = _parse_twitch_vod_ref(twitch_vod_url, twitch_vod_offset)
+ 
+     # Normalize output format (auto = keep pipeline default).
+     if output_format not in ("vertical", "horizontal", "square"):
+@@ -6287,6 +6318,12 @@ async def process_endpoint(
+         env["AUTO_CAPTIONS"] = "0"
+         print(f"[captions] job={job_id} auto-captions off")
+ 
++    env.pop("TWITCH_VOD_URL", None)
++    env.pop("TWITCH_VOD_OFFSET", None)
++    if vod_ref and not url:
++        env["TWITCH_VOD_URL"], env["TWITCH_VOD_OFFSET"] = vod_ref
++        print(f"[twitch-vod] job={job_id} stretch at {vod_ref[1]}s")
++
+     input_path = None
+     if url:
+         # Keep the downloaded source inside the job dir: the clip editor's
+diff --git a/main.py b/main.py
+index a78e80e..73762d3 100644
+--- a/main.py
++++ b/main.py
+@@ -2959,6 +2959,11 @@ if __name__ == '__main__':
+     viewer_clips = []
+     if args.url and not args.skip_analysis and not args.prepare_only:
+         viewer_clips = twitch_signals.viewer_clips_for_job(args.url, 0)
++    elif (os.environ.get("TWITCH_VOD_URL") and not args.skip_analysis
++          and not args.prepare_only):
++        # An uploaded stretch of a VOD (/api/process twitch_vod_url).
++        viewer_clips = twitch_signals.viewer_clips_for_stretch(
++            os.environ["TWITCH_VOD_URL"], os.environ.get("TWITCH_VOD_OFFSET", 0))
+ 
+     # 1. Get Input Video
+     if args.url:
+diff --git a/tests/test_twitch_vod_stretch.py b/tests/test_twitch_vod_stretch.py
+new file mode 100644
+index 0000000..f0b584f
+--- /dev/null
++++ b/tests/test_twitch_vod_stretch.py
+@@ -0,0 +1,97 @@
++"""An uploaded stretch of a Twitch VOD keeps the viewer-clip signal.
++
++/api/process takes ``twitch_vod_url`` + ``twitch_vod_offset`` with an upload;
++the job env carries them and main.py shifts the VOD's viewer clips into the
++file's own seconds (twitch_signals.viewer_clips_for_stretch).
++"""
++import asyncio
++
++import httpx
++import pytest
++
++import twitch_signals
++
++VOD = "https://www.twitch.tv/videos/2600000001"
++
++
++def test_stretch_clips_are_shifted_into_file_time(monkeypatch):
++    monkeypatch.setattr(twitch_signals, "fetch_viewer_clips", lambda vid: [
++        {"start": 3700.0, "duration": 30.0, "views": 900},   # 100 s into the file
++        {"start": 3550.0, "duration": 20.0, "views": 50},    # wholly before it
++        {"start": 3595.0, "duration": 20.0, "views": 70},    # straddles the start
++    ])
++    out = twitch_signals.viewer_clips_for_stretch(VOD, "3600")
++    # Kept when the midpoint is inside the file, clamped to it (shift_clips).
++    assert out == [{"start": 100.0, "end": 130.0, "views": 900},
++                   {"start": 0.0, "end": 15.0, "views": 70}]
++
++
++def test_stretch_needs_a_vod_link(monkeypatch):
++    monkeypatch.setattr(twitch_signals, "fetch_viewer_clips",
++                        lambda vid: pytest.fail("must not call Helix"))
++    assert twitch_signals.viewer_clips_for_stretch("https://clips.twitch.tv/Abc", 0) == []
++
++
++app_module = pytest.importorskip("app")
++
++
++@pytest.fixture()
++def upload(tmp_path, monkeypatch):
++    out_root = tmp_path / "output"; up_root = tmp_path / "uploads"
++    out_root.mkdir(); up_root.mkdir()
++    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(out_root))
++    monkeypatch.setattr(app_module, "UPLOAD_DIR", str(up_root))
++    monkeypatch.setattr(app_module, "_media_duration_seconds", lambda p: 720.0)
++
++    async def fake_put(item):
++        pass
++    monkeypatch.setattr(app_module.job_queue, "put", fake_put)
++
++    async def _make():
++        async with _client() as c:
++            slot = (await c.post("/api/uploads", json={"filename": "stretch.mp4"})).json()
++            r = await c.put(f"/api/uploads/{slot['upload_id']}", content=b"\x00" * 4096)
++            assert r.status_code == 200
++            return slot["upload_id"]
++    return asyncio.run(_make())
++
++
++def _client():
++    transport = httpx.ASGITransport(app=app_module.app)
++    return httpx.AsyncClient(transport=transport, base_url="http://testserver",
++                             headers={"X-Gemini-Key": "test-key"})
++
++
++def _process(body):
++    async def _do():
++        async with _client() as c:
++            return await c.post("/api/process", json=body)
++    return asyncio.run(_do())
++
++
++def test_process_puts_the_vod_ref_in_the_job_env(upload):
++    r = _process({"upload_id": upload, "acknowledged": True,
++                  "twitch_vod_url": VOD, "twitch_vod_offset": 3600})
++    assert r.status_code == 200, r.text
++    env = app_module.jobs[r.json()["job_id"]]["env"]
++    assert env["TWITCH_VOD_URL"] == VOD
++    assert env["TWITCH_VOD_OFFSET"] == "3600.000"
++
++
++def test_no_vod_ref_leaves_env_alone(upload):
++    r = _process({"upload_id": upload, "acknowledged": True})
++    assert r.status_code == 200, r.text
++    env = app_module.jobs[r.json()["job_id"]]["env"]
++    assert "TWITCH_VOD_URL" not in env and "TWITCH_VOD_OFFSET" not in env
++
++
++@pytest.mark.parametrize("vod_url,offset", [
++    ("https://www.twitch.tv/somebody", 0),        # channel page, not a VOD
++    ("https://example.com/videos/123", 0),        # not Twitch
++    (VOD, -5),
++    (VOD, "soon"),
++])
++def test_bad_vod_ref_is_a_400(upload, vod_url, offset):
++    r = _process({"upload_id": upload, "acknowledged": True,
++                  "twitch_vod_url": vod_url, "twitch_vod_offset": offset})
++    assert r.status_code == 400
+diff --git a/twitch_signals.py b/twitch_signals.py
+index df1f4d9..d2e833d 100644
+--- a/twitch_signals.py
++++ b/twitch_signals.py
+@@ -267,3 +267,28 @@ def viewer_clips_for_job(url, duration: float) -> List[dict]:
+     print(f"   👀 Twitch: {len(shifted)} viewer clip(s) inside this source "
+           f"({len(clips)} on the VOD).")
+     return shifted
++
++
++def viewer_clips_for_stretch(vod_url, offset_seconds) -> List[dict]:
++    """Viewer clips for an uploaded stretch of a VOD, in the file's own seconds.
++
++    For a caller that downloaded part of a VOD itself and uploads that file
++    (``twitch_vod_url`` + ``twitch_vod_offset`` on /api/process, set as
++    ``TWITCH_VOD_URL`` / ``TWITCH_VOD_OFFSET``): second 0 of the file is second
++    ``offset_seconds`` of the VOD. Clips past the end of the file land in no
++    transcript window and are ignored by ``window_heat``.
++    """
++    vod_id = parse_vod_id(vod_url)
++    if not vod_id:
++        return []
++    try:
++        start = max(0.0, float(offset_seconds or 0))
++    except (TypeError, ValueError):
++        start = 0.0
++    clips = fetch_viewer_clips(vod_id)
++    if not clips:
++        return []
++    shifted = shift_clips(clips, start, math.inf)
++    print(f"   👀 Twitch: {len(shifted)} viewer clip(s) from {start:.0f}s on "
++          f"({len(clips)} on the VOD).")
++    return shifted

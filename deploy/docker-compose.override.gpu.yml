@@ -1,0 +1,17 @@
+# Installed as openshorts/docker-compose.override.yml by
+# `scripts/setup_openshorts.sh --gpu` (compose picks it up automatically).
+# GPU: "1" adds cuBLAS/cuDNN + onnxruntime-gpu to the image; the `video`
+# capability is what NVENC needs. Works with Docker Desktop on WSL2.
+services:
+  backend:
+    build:
+      context: .
+      args:
+        GPU: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]

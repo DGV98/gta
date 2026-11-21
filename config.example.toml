@@ -1,0 +1,31 @@
+# gta-shorts settings. Copy to config.toml and adjust. Secrets go in .env.
+
+[twitch]
+game_name = "Grand Theft Auto VI"
+# game_id = ""            # set this if the category name lookup ever fails
+language = "en"           # stream language filter for `discover` ("" = any)
+
+[selection]
+stretches_per_vod = 2     # how many hot stretches of each VOD to clip
+stretch_minutes = 12      # length of each stretch
+lead_seconds = 60         # start this long before the first viewer clip (setup)
+min_viewer_clips = 2      # a stretch with fewer viewer clips is not worth a job
+
+[openshorts]
+api_url = "http://localhost:8000"
+layouts = ["auto"]        # Gemini picks per video: facecam stacked under gameplay for streams
+auto_hook = true          # burn the hook text over the first seconds
+captions = true
+# clip_min_seconds = 15   # openshorts default band is 15-60 s
+# clip_max_seconds = 60
+# target_clips = 4        # per stretch; default scales with length
+poll_seconds = 10
+timeout_minutes = 90
+
+[download]
+max_height = 1080
+
+[output]
+dir = "runs"
+credit = "🎥 twitch.tv/{login}"   # appended to every caption; {login} and {name} available
+keep_sources = false              # delete each downloaded stretch once clipped

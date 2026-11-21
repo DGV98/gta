@@ -1,0 +1,209 @@
+diff --git a/content_profile.py b/content_profile.py
+new file mode 100644
+index 0000000..cf1da87
+--- /dev/null
++++ b/content_profile.py
+@@ -0,0 +1,96 @@
++"""Deployment-wide editorial guidance for the clip-selection prompts.
++
++A self-hosted instance that only ever clips one kind of footage (one game, one
++show) knows things the generic prompts cannot: what a good moment looks like
++there, what to always skip, how the copy should read. ``CLIP_PROFILE_FILE``
++points at a plain-text file with up to three sections:
++
++    [score]
++    ...appended to the window-scoring prompt...
++
++    [detail]
++    ...appended to the clip-picking / copywriting prompt...
++
++    [visual]
++    ...appended to the silent-footage (vision) prompt...
++
++Text before the first header goes to all three. Lines starting with ``#`` are
++comments. Unset variable, missing file or empty sections: the templates are
++returned unchanged, so an instance without a profile behaves exactly as before.
++
++The guidance is inserted before the prompt's data block (``TRANSCRIPT_LANGUAGE:
++{language}``) so the model reads it alongside the rules rather than after the
++JSON contract, and braces are escaped so ``str.format`` leaves it alone.
++Standard library only: CI imports this without the ML stack.
++"""
++import os
++import re
++from typing import Dict, Tuple
++
++SECTIONS = ("score", "detail", "visual")
++_HEADER = re.compile(r"^\[(\w+)\]\s*$")
++DATA_ANCHOR = "\nTRANSCRIPT_LANGUAGE: {language}\n"
++HEADING = "DEPLOYMENT GUIDANCE (this instance clips one kind of footage; follow it):"
++
++
++def parse(text: str) -> Dict[str, str]:
++    """``{"score": ..., "detail": ..., "visual": ...}`` from a profile file's text."""
++    common, per = [], {s: [] for s in SECTIONS}
++    current = None
++    for raw in (text or "").splitlines():
++        line = raw.rstrip()
++        if line.lstrip().startswith("#"):
++            continue
++        m = _HEADER.match(line.strip())
++        if m:
++            name = m.group(1).lower()
++            current = name if name in per else "__ignored__"
++            continue
++        if current is None:
++            common.append(line)
++        elif current in per:
++            per[current].append(line)
++    shared = "\n".join(common).strip()
++    out = {}
++    for name in SECTIONS:
++        body = "\n".join(per[name]).strip()
++        out[name] = "\n\n".join(p for p in (shared, body) if p)
++    return out
++
++
++def load(path=None) -> Dict[str, str]:
++    """The profile named by ``path`` or ``CLIP_PROFILE_FILE``; empty sections if none."""
++    path = path if path is not None else os.environ.get("CLIP_PROFILE_FILE", "").strip()
++    if not path:
++        return {s: "" for s in SECTIONS}
++    try:
++        with open(path, encoding="utf-8") as f:
++            return parse(f.read())
++    except OSError as e:
++        print(f"   ⚠️ CLIP_PROFILE_FILE unreadable ({e}); prompts left unchanged.")
++        return {s: "" for s in SECTIONS}
++
++
++def _escape(text: str) -> str:
++    return text.replace("{", "{{").replace("}", "}}")
++
++
++def inject(template: str, guidance: str) -> str:
++    """``template`` with ``guidance`` added before its data block (or at the end)."""
++    if not guidance:
++        return template
++    block = f"\n{HEADING}\n{_escape(guidance)}\n"
++    if DATA_ANCHOR in template:
++        return template.replace(DATA_ANCHOR, block + DATA_ANCHOR, 1)
++    return template.rstrip("\n") + "\n" + block
++
++
++def apply_all(score: str, detail: str, visual: str, path=None) -> Tuple[str, str, str]:
++    """The three prompt templates with the deployment's profile applied."""
++    profile = load(path)
++    if any(profile.values()):
++        names = [s for s in SECTIONS if profile[s]]
++        print(f"   🧭 Clip profile applied to: {', '.join(names)}")
++    return (inject(score, profile["score"]),
++            inject(detail, profile["detail"]),
++            inject(visual, profile["visual"]))
+diff --git a/gemini_worker.py b/gemini_worker.py
+index e8bcc78..fabe4a1 100644
+--- a/gemini_worker.py
++++ b/gemini_worker.py
+@@ -371,6 +371,12 @@ Return only:
+ }}
+ """
+ 
++# Deployment profile (CLIP_PROFILE_FILE): editorial guidance for an instance
++# that clips one kind of footage. No-op when unset (content_profile.py).
++import content_profile  # noqa: E402
++SCORE_PROMPT_TEMPLATE, DETAIL_PROMPT_TEMPLATE, VISUAL_PROMPT_TEMPLATE = content_profile.apply_all(
++    SCORE_PROMPT_TEMPLATE, DETAIL_PROMPT_TEMPLATE, VISUAL_PROMPT_TEMPLATE)
++
+ 
+ def _strip_code_fences(text: str) -> str:
+     text = (text or "").strip()
+diff --git a/tests/test_content_profile.py b/tests/test_content_profile.py
+new file mode 100644
+index 0000000..d9c296e
+--- /dev/null
++++ b/tests/test_content_profile.py
+@@ -0,0 +1,84 @@
++"""CLIP_PROFILE_FILE: deployment guidance injected into the selection prompts.
++
++Pure logic: the real templates are read via ast (gemini_worker pulls
++google-genai, absent in the thin CI env), like test_generation_controls.
++"""
++import ast
++import os
++
++import content_profile
++
++PROFILE = """\
++# comment lines are dropped
++Shared line for every prompt.
++
++[score]
++Score loud chaos {high}.
++
++[detail]
++Hashtags: #GTA6
++
++[visual]
++Watch for crashes.
++
++[unknown]
++never used
++"""
++
++
++def _templates():
++    mod = ast.parse(open(os.path.join(os.path.dirname(__file__), "..",
++                                      "gemini_worker.py")).read())
++    return {
++        node.targets[0].id: node.value.value
++        for node in mod.body
++        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
++        and isinstance(node.targets[0], ast.Name)
++        and node.targets[0].id.endswith("_PROMPT_TEMPLATE")
++    }
++
++
++def test_parse_splits_sections_and_shares_the_preamble():
++    p = content_profile.parse(PROFILE)
++    assert p["score"] == "Shared line for every prompt.\n\nScore loud chaos {high}."
++    assert p["detail"].endswith("Hashtags: #GTA6")
++    assert p["visual"].startswith("Shared line")
++    assert "comment" not in p["score"] and "never used" not in p["detail"]
++
++
++def test_no_profile_leaves_templates_identical(monkeypatch):
++    monkeypatch.delenv("CLIP_PROFILE_FILE", raising=False)
++    t = _templates()
++    out = content_profile.apply_all(t["SCORE_PROMPT_TEMPLATE"], t["DETAIL_PROMPT_TEMPLATE"],
++                                    t["VISUAL_PROMPT_TEMPLATE"])
++    assert out == (t["SCORE_PROMPT_TEMPLATE"], t["DETAIL_PROMPT_TEMPLATE"],
++                   t["VISUAL_PROMPT_TEMPLATE"])
++
++
++def test_missing_file_is_not_fatal(tmp_path):
++    assert content_profile.load(str(tmp_path / "nope.txt")) == {
++        "score": "", "detail": "", "visual": ""}
++
++
++def test_profile_lands_before_the_data_block_and_still_formats(tmp_path):
++    path = tmp_path / "profile.txt"
++    path.write_text(PROFILE, encoding="utf-8")
++    t = _templates()
++    score, detail, visual = content_profile.apply_all(
++        t["SCORE_PROMPT_TEMPLATE"], t["DETAIL_PROMPT_TEMPLATE"],
++        t["VISUAL_PROMPT_TEMPLATE"], path=str(path))
++
++    s = score.format(video_duration=100, language="en", windows_json="[]")
++    assert "Score loud chaos {high}." in s          # braces survive .format
++    assert s.index("Score loud chaos") < s.index("TRANSCRIPT_LANGUAGE: en")
++    assert s.index("Score loud chaos") > s.index("THE 2-SECOND TEST")
++
++    d = detail.format(video_duration=100, language="en", min_clips=2, max_clips=4,
++                      min_secs=15.0, max_secs=60.0, windows_json="[]")
++    assert "Hashtags: #GTA6" in d
++    assert d.index("Hashtags: #GTA6") < d.index("CANDIDATE_WINDOWS_JSON")
++    assert "Score loud chaos" not in d
++
++    v = visual.format(video_duration=100, language="en", min_clips=2, max_clips=4,
++                      min_secs=15.0, max_secs=60.0)
++    assert v.rstrip().endswith("Watch for crashes.")

@@ -1,0 +1,39 @@
+# GTA VI editorial guidance for openshorts' clip-selection prompts.
+# Loaded via CLIP_PROFILE_FILE (patch 0001). Text before the first [section]
+# goes to every prompt. Lines starting with # are ignored.
+# Tune this file after looking at real output; it is the main quality lever.
+
+SOURCE: English-language Twitch streams of Grand Theft Auto VI (released 19 November 2026, single-player story and free roam), usually with the streamer's facecam composited in a corner. The audience is GTA fans scrolling TikTok, Reels and Shorts who have not seen the stream. Mature in-game content (violence, crime, chases) is normal for GTA and is NOT a reason to skip a moment.
+
+[score]
+HIGH (70+) when the window holds one of these AND makes sense cold:
+- A big genuine reaction to something that happens in the game: screaming, crying laughing, rage, stunned disbelief.
+- Chaos with a payoff: a police chase that ends in a crash, a stunt that goes wrong, ragdoll physics, explosions, getting wrecked by NPCs, animals or traffic.
+- Absurd or funny NPC behaviour and dialogue, or the streamer roasting an NPC.
+- Glitches and bugs that are funny or spectacular.
+- Discoveries: easter eggs, hidden details, "you can do THIS in GTA 6" moments.
+- First reactions to big story moments, characters, twists or missions.
+- Skill: a clean escape, an insane drive, a clutch shot.
+LOW (under 30):
+- Starting-soon, BRB and ending screens; menus, map, settings, loading; browsing outfits or cars with nothing happening.
+- Long cutscenes the streamer watches in silence; walking or driving where nothing happens.
+- Reading subs, donations or sponsor segments; ad breaks; chat housekeeping; AFK.
+- Talk about anything other than what is on screen (other games, real-life stories) unless it is a standalone hilarious bit.
+- Stretches where only licensed radio music plays.
+ZERO: slurs, hate speech, harassment of a real person, sexual talk, doxxing, or anything else that would get a TikTok account banned.
+A window viewers clipped with thin transcript is usually loud gameplay: trust the viewer clips.
+
+[detail]
+- Open on the action or the reaction, never on setup chatter. Build-up is fine only when the payoff lands within about 10 seconds of the start.
+- End just after the reaction to the payoff (the laugh, the scream, the "NO WAY"), never before it.
+- Hook: name the concrete in-game thing that happens, with 1-2 emojis (💀 😭 🔥 😳). Good: "He stole a cop car mid-chase 😭", "GTA 6 NPCs are unhinged 💀". Bad: "Funniest GTA 6 moment", "You won't believe this".
+- Never claim a game feature or event that is not shown or said in the clip.
+- Do NOT name the streamer, tag accounts or add a call to action: the pipeline adds the streamer credit itself.
+- Hashtags: always #GTA6 and #GTAVI, then 1-3 about this moment (e.g. #gta6funny #gta6glitch #gta6police). No #fyp / #viral spam.
+- Tone: casual gaming slang is fine; keep descriptions under 150 characters before the hashtags.
+
+[visual]
+- Prefer crashes, explosions, chases, ragdolls, stunts, glitches, wildlife chaos and absurd NPC behaviour.
+- If the facecam is visible, a big visible reaction makes the moment stronger.
+- Skip menus, the map, loading screens, static scenes and cutscenes with no action.
+- Hook and title rules from above apply: name what happens, no streamer names.

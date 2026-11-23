@@ -1,0 +1,8 @@
+.git
+.venv
+.env
+config.toml
+runs
+openshorts
+**/__pycache__
+.pytest_cache

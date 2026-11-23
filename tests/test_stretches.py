@@ -82,3 +82,22 @@ def test_parse_time_rejects(bad):
 
 def test_fmt_time():
     assert fmt_time(3725.4) == "1:02:05" and fmt_time(65) == "1:05"
+
+
+def test_muted_spans_are_avoided():
+    from gta_shorts.stretches import muted_seconds
+    clips = [C(3600, 30, 900), C(7200, 30, 10)]
+    muted = [(3000.0, 1800.0)]                     # 0:50:00-1:20:00 has no audio
+    assert muted_seconds(3540, 4260, muted) == 720
+    got = plan_stretches(clips, 6 * 3600, length=720, count=2, muted=muted,
+                         max_muted_fraction=0.25)
+    assert [s.start for s in got] == [7140.0]
+    # Without the muting info the hot clip wins, as before.
+    assert plan_stretches(clips, 6 * 3600, length=720, count=1)[0].start == 3540.0
+
+
+def test_partly_muted_stretch_is_fine_under_the_fraction():
+    clips = [C(3600, 30, 900)]
+    got = plan_stretches(clips, 6 * 3600, length=720, count=1, muted=[(4100.0, 100.0)],
+                         max_muted_fraction=0.25)
+    assert [s.start for s in got] == [3540.0]

@@ -8,7 +8,7 @@ activity cuts download, disk and GPU time by an order of magnitude.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -31,8 +31,15 @@ def _inside(clip, start: float, end: float) -> bool:
     return start <= clip.start and clip.start + clip.duration <= end
 
 
+def muted_seconds(start: float, end: float, muted: Sequence[Tuple[float, float]]) -> float:
+    """How much of [start, end) falls in Twitch's muted (offset, duration) spans."""
+    return sum(max(0.0, min(end, off + dur) - max(start, off)) for off, dur in muted)
+
+
 def plan_stretches(clips: Sequence, vod_duration: float, length: float, count: int,
-                   lead: float = 60.0, min_clips: int = 1) -> List[Stretch]:
+                   lead: float = 60.0, min_clips: int = 1,
+                   muted: Sequence[Tuple[float, float]] = (),
+                   max_muted_fraction: float = 1.0) -> List[Stretch]:
     """Up to ``count`` non-overlapping ``length``-second stretches, hottest first.
 
     ``clips`` have ``.start`` (VOD seconds), ``.duration`` and ``.views``. Each
@@ -41,14 +48,23 @@ def plan_stretches(clips: Sequence, vod_duration: float, length: float, count: i
     inside it. Greedy: take the hottest, drop candidates that overlap it,
     repeat. A stretch with fewer than ``min_clips`` clips is not worth a job.
     A VOD shorter than ``length`` is one stretch covering all of it.
+
+    ``muted`` spans (copyrighted music Twitch silenced) have no audio, so no
+    transcript and no reaction: a clip mostly inside one does not count, and
+    a stretch more than ``max_muted_fraction`` muted is not taken.
     """
     total = max(0.0, float(vod_duration))
     if count <= 0 or length <= 0 or total <= 0:
         return []
-    usable = [c for c in clips if 0 <= c.start < total]
+    usable = [c for c in clips if 0 <= c.start < total
+              and muted_seconds(c.start, c.start + c.duration, muted) <= c.duration / 2]
+
+    def too_muted(start: float, end: float) -> bool:
+        return muted_seconds(start, end, muted) > max_muted_fraction * (end - start)
+
     if total <= length:
         heat = [c for c in usable if _inside(c, 0.0, total)]
-        if len(heat) < min_clips:
+        if len(heat) < min_clips or too_muted(0.0, total):
             return []
         return [Stretch(0.0, round(total, 3), len(heat), sum(c.views for c in heat))]
 
@@ -68,6 +84,8 @@ def plan_stretches(clips: Sequence, vod_duration: float, length: float, count: i
         if len(inside) < min_clips:
             continue
         if any(start < s.end and s.start < end for s in chosen):
+            continue
+        if too_muted(start, end):
             continue
         chosen.append(Stretch(round(start, 3), round(end, 3), len(inside),
                               sum(c.views for c in inside)))

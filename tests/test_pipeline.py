@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 import httpx
 import pytest
@@ -134,3 +133,17 @@ def test_clip_entry_adds_credit_and_vod_time():
     assert e["captions"]["instagram"] == "🎥 twitch.tv/streamer"
     assert e["vod_start"] == 3552.0 and e["duration"] == 29.5
     assert e["vod_link"] == "https://www.twitch.tv/videos/2600000001?t=0h59m12s"
+
+
+def test_unknown_job_is_jobfailed_not_polled_forever():
+    fake = FakeOpenShorts()
+    fake.lost.add("job9")
+    with pytest.raises(JobFailed):
+        _api(fake).wait("job9")
+
+
+def test_clip_vod_reports_submissions_and_cost(cfg):
+    fake, seen = FakeOpenShorts(cost=0.0123), []
+    m = clip_vod(cfg, VOD, [ST], _api(fake), log=lambda s: None, downloader=FakeDownloader(),
+                 probe=lambda p: 1.0, on_submit=lambda e: seen.append(e["job_id"]))
+    assert seen == ["job1"] and m["stretches"][0]["cost_usd"] == 0.0123

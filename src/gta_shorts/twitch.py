@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -25,6 +25,10 @@ _VOD_PATH = re.compile(r"^/(?:[^/]+/)?(?:videos?|v)/(\d+)/?$")
 
 class TwitchError(RuntimeError):
     pass
+
+
+class VodGone(TwitchError):
+    """The VOD was deleted, expired or made subscriber-only."""
 
 
 def parse_vod_id(value: str) -> Optional[str]:
@@ -65,6 +69,16 @@ class Stream:
     title: str
     language: str
     started_at: str
+    id: str = ""             # the live stream's id; an archive VOD carries it as stream_id
+    game_id: str = ""
+
+    @classmethod
+    def from_helix(cls, d: dict) -> "Stream":
+        return cls(user_id=str(d["user_id"]), user_login=d["user_login"],
+                   user_name=d.get("user_name") or d["user_login"],
+                   viewer_count=int(d.get("viewer_count") or 0), title=d.get("title") or "",
+                   language=d.get("language") or "", started_at=d.get("started_at") or "",
+                   id=str(d.get("id") or ""), game_id=str(d.get("game_id") or ""))
 
 
 @dataclass(frozen=True)
@@ -78,13 +92,25 @@ class Vod:
     duration: float          # seconds (grows while the stream is still live)
     view_count: int
     url: str
+    stream_id: Optional[str] = None
+    viewable: str = "public"
+    muted: Tuple[Tuple[float, float], ...] = ()     # (offset, duration): audio Twitch muted
 
     @classmethod
     def from_helix(cls, d: dict) -> "Vod":
+        muted = tuple((float(m.get("offset") or 0), float(m.get("duration") or 0))
+                      for m in d.get("muted_segments") or [])
         return cls(id=str(d["id"]), user_id=str(d["user_id"]), user_login=d["user_login"],
                    user_name=d.get("user_name") or d["user_login"], title=d.get("title") or "",
                    created_at=d["created_at"], duration=parse_time(d.get("duration") or "0s"),
-                   view_count=int(d.get("view_count") or 0), url=d.get("url") or vod_url(d["id"]))
+                   view_count=int(d.get("view_count") or 0), url=d.get("url") or vod_url(d["id"]),
+                   stream_id=str(d["stream_id"]) if d.get("stream_id") else None,
+                   viewable=d.get("viewable") or "public", muted=muted)
+
+    @property
+    def ended_at(self) -> datetime:
+        """When the stream ended (or now-ish, while it is still live)."""
+        return _ts(self.created_at) + timedelta(seconds=self.duration)
 
 
 @dataclass(frozen=True)
@@ -94,6 +120,12 @@ class ViewerClip:
     views: int
     title: str
     url: str
+    game_id: str = ""        # category at the moment it was clipped
+
+
+def _chunks(items: List[str], n: int = 100) -> Iterator[List[str]]:
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
 
 
 class Helix:
@@ -164,11 +196,24 @@ class Helix:
         params = {"game_id": game_id, "type": "live"}
         if language:
             params["language"] = language
-        return [Stream(user_id=str(d["user_id"]), user_login=d["user_login"],
-                       user_name=d.get("user_name") or d["user_login"],
-                       viewer_count=int(d.get("viewer_count") or 0), title=d.get("title") or "",
-                       language=d.get("language") or "", started_at=d.get("started_at") or "")
-                for d in self.paginate("streams", params, limit)]
+        return [Stream.from_helix(d) for d in self.paginate("streams", params, limit)]
+
+    def streams_for_users(self, user_ids: Iterable[str]) -> Dict[str, Stream]:
+        """Which of these channels are live right now (any game), keyed by user id."""
+        out: Dict[str, Stream] = {}
+        for chunk in _chunks(sorted(set(user_ids))):
+            for d in self.paginate("streams", {"user_id": chunk, "type": "live"}, len(chunk)):
+                out[str(d["user_id"])] = Stream.from_helix(d)
+        return out
+
+    def users(self, logins: Iterable[str]) -> Dict[str, Tuple[str, str]]:
+        """login -> (user id, display name), for the logins that exist."""
+        wanted = sorted({l.strip().lower() for l in logins if l and l.strip()})
+        out: Dict[str, Tuple[str, str]] = {}
+        for chunk in _chunks(wanted):
+            for d in self.get("users", {"login": chunk}).get("data") or []:
+                out[d["login"].lower()] = (str(d["id"]), d.get("display_name") or d["login"])
+        return out
 
     def user_id(self, login: str) -> str:
         data = self.get("users", {"login": login.strip().lower()}).get("data") or []
@@ -181,13 +226,23 @@ class Helix:
                 self.paginate("videos", {"user_id": user_id, "type": "archive"}, limit)]
 
     def vod(self, vod_id: str) -> Vod:
-        data = self.get("videos", {"id": vod_id}).get("data") or []
+        try:
+            data = self.get("videos", {"id": vod_id}).get("data") or []
+        except TwitchError as e:
+            if "-> 404" in str(e):
+                raise VodGone(f"VOD {vod_id} not found (deleted, expired or sub-only).") from e
+            raise
         if not data:
-            raise TwitchError(f"VOD {vod_id} not found (deleted, expired or sub-only).")
+            raise VodGone(f"VOD {vod_id} not found (deleted, expired or sub-only).")
         return Vod.from_helix(data[0])
 
-    def vod_clips(self, vod: Vod, max_clips: int = 500, now: Optional[datetime] = None) -> List[ViewerClip]:
-        """Clips viewers cut from this VOD (during the stream or after), most viewed first."""
+    def vod_clips(self, vod: Vod, max_clips: int = 500, now: Optional[datetime] = None,
+                  game_id: Optional[str] = None) -> List[ViewerClip]:
+        """Clips viewers cut from this VOD (during the stream or after), most viewed first.
+
+        With ``game_id``, only clips cut while the stream was in that category:
+        a stream that switches games keeps just its GTA VI part.
+        """
         created = _ts(vod.created_at)
         now = now or datetime.now(timezone.utc)
         params = {"broadcaster_id": vod.user_id, "started_at": _iso(created),
@@ -196,8 +251,11 @@ class Helix:
         for c in self.paginate("clips", params, max_clips):
             if str(c.get("video_id") or "") != vod.id or c.get("vod_offset") is None:
                 continue      # another VOD's clip, or cut while the VOD was unavailable
+            clip_game = str(c.get("game_id") or "")
+            if game_id and clip_game and clip_game != str(game_id):
+                continue      # cut while the stream was in another category
             out.append(ViewerClip(start=float(c["vod_offset"]), duration=float(c.get("duration") or 0),
                                   views=int(c.get("view_count") or 0), title=c.get("title") or "",
-                                  url=c.get("url") or ""))
+                                  url=c.get("url") or "", game_id=clip_game))
         out.sort(key=lambda c: -c.views)
         return out

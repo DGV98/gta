@@ -71,7 +71,12 @@ class OpenShorts:
         return out["job_id"]
 
     def status(self, job_id: str) -> dict:
-        return self._check(self._http.get(f"/api/status/{job_id}"), "status")
+        r = self._http.get(f"/api/status/{job_id}")
+        if r.status_code == 404:
+            # Lost (openshorts restarted mid-job, or the job expired): treat it
+            # as failed so the stretch is submitted again instead of polled forever.
+            raise JobFailed(f"job {job_id} is unknown to openshorts (restarted or expired)")
+        return self._check(r, "status")
 
     def wait(self, job_id: str, *, poll: float = 10.0, timeout: float = 5400.0,
              on_log: Optional[Callable[[str], None]] = None) -> dict:

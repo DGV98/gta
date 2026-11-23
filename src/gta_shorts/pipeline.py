@@ -12,12 +12,12 @@ import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 from .config import Config
 from .download import download_stretch, media_duration
 from .openshorts_client import JobFailed, OpenShorts
-from .stretches import Stretch
+from .stretches import Stretch, plan_stretches
 from .twitch import Vod
 
 Log = Callable[[str], None]
@@ -76,9 +76,22 @@ def clip_entry(clip: dict, vod: Vod, stretch: Stretch, credit_template: str, fil
     }
 
 
+def plan_vod(cfg: Config, vod: Vod, clips: Sequence, *, count: Optional[int] = None,
+             minutes: Optional[float] = None) -> List[Stretch]:
+    """The config's stretch plan for a VOD, skipping parts Twitch muted."""
+    return plan_stretches(
+        clips, vod.duration,
+        length=(minutes or cfg.stretch_minutes) * 60,
+        count=count or cfg.stretches_per_vod,
+        lead=cfg.lead_seconds, min_clips=cfg.min_viewer_clips,
+        muted=vod.muted, max_muted_fraction=cfg.max_muted_fraction)
+
+
 def clip_vod(cfg: Config, vod: Vod, stretches: List[Stretch], api: OpenShorts, *,
              log: Log = print, job_log: Optional[Log] = None,
-             downloader=download_stretch, probe=media_duration) -> dict:
+             downloader=download_stretch, probe=media_duration,
+             on_submit: Optional[Callable[[dict], None]] = None) -> dict:
+    """Clip ``stretches`` of ``vod``; ``on_submit(entry)`` runs after each job starts."""
     run_dir = run_dir_for(cfg, vod)
     mpath = run_dir / "manifest.json"
     manifest = load_manifest(mpath) or {
@@ -118,10 +131,15 @@ def clip_vod(cfg: Config, vod: Vod, stretches: List[Stretch], api: OpenShorts, *
                 entry["status"] = "processing"
                 save_manifest(mpath, manifest)
                 log(f"{label}: job {entry['job_id']} queued")
+                if on_submit:
+                    on_submit(entry)
             else:
                 log(f"{label}: resuming job {entry['job_id']}")
             result = api.wait(entry["job_id"], poll=cfg.poll_seconds,
                               timeout=cfg.timeout_minutes * 60, on_log=job_log)
+            cost = (result.get("cost_analysis") or {}).get("total_cost")
+            if cost is not None:
+                entry["cost_usd"] = round(float(cost), 6)
             clips = sorted(result.get("clips") or [],
                            key=lambda c: -(c.get("predicted_score") or 0))
             entry["clips"] = []
@@ -130,6 +148,7 @@ def clip_vod(cfg: Config, vod: Vod, stretches: List[Stretch], api: OpenShorts, *
                 api.download_clip(clip, sdir / name)
                 entry["clips"].append(clip_entry(clip, vod, st, cfg.credit, f"{entry['dir']}/{name}"))
             entry["status"] = "done"
+            entry.pop("error", None)
             if not cfg.keep_sources and entry.get("source"):
                 (sdir / entry["source"]).unlink(missing_ok=True)
             save_manifest(mpath, manifest)

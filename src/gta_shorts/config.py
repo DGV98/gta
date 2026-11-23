@@ -36,6 +36,21 @@ class Config:
     output_dir: Path = Path("runs")
     credit: str = "🎥 twitch.tv/{login}"
     keep_sources: bool = False
+    # [watch] (the 24/7 loop)
+    priority: List[str] = field(default_factory=list)
+    discover_top: int = 20
+    min_viewers: int = 2000
+    track_days: float = 5.0
+    poll_minutes: float = 30.0
+    settle_minutes: float = 30.0
+    max_vod_age_hours: float = 48.0
+    max_stretches_per_day: int = 12
+    max_usd_per_day: Optional[float] = 1.0
+    max_attempts: int = 3
+    max_muted_fraction: float = 0.25
+    min_free_gb: float = 20.0
+    keep_clip_days: float = 14.0
+    state_db: Path = Path("state.db")
     # secrets (.env)
     twitch_client_id: str = ""
     twitch_client_secret: str = ""
@@ -61,6 +76,9 @@ _SECTIONS = {
                    "poll_seconds", "timeout_minutes"),
     "download": ("max_height",),
     "output": ("dir", "credit", "keep_sources"),
+    "watch": ("priority", "discover_top", "min_viewers", "track_days", "poll_minutes",
+              "settle_minutes", "max_vod_age_hours", "max_stretches_per_day", "max_usd_per_day",
+              "max_attempts", "max_muted_fraction", "min_free_gb", "keep_clip_days", "state_db"),
 }
 
 
@@ -80,6 +98,8 @@ def load(path: Optional[Path] = None) -> Config:
                     value = data[section][key]
                     if section == "output" and key == "dir":
                         cfg.output_dir = Path(value) if Path(value).is_absolute() else base / value
+                    elif key == "state_db":
+                        cfg.state_db = Path(value)
                     else:
                         setattr(cfg, key, value)
         unknown = set(data) - set(_SECTIONS)
@@ -89,8 +109,15 @@ def load(path: Optional[Path] = None) -> Config:
         cfg.output_dir = base / cfg.output_dir
     if cfg.language == "":
         cfg.language = None
+    if not cfg.state_db.is_absolute():
+        cfg.state_db = cfg.output_dir / cfg.state_db
+    cfg.priority = [str(l).strip().lower() for l in cfg.priority if str(l).strip()]
+    if cfg.max_usd_per_day is not None and cfg.max_usd_per_day <= 0:
+        cfg.max_usd_per_day = None
     load_dotenv(base / ".env")
     load_dotenv()  # cwd .env too; never overrides variables already set
     cfg.twitch_client_id = os.environ.get("TWITCH_CLIENT_ID", "").strip()
     cfg.twitch_client_secret = os.environ.get("TWITCH_CLIENT_SECRET", "").strip()
+    # The watcher container reaches openshorts by service name, not localhost.
+    cfg.api_url = os.environ.get("GTA_SHORTS_API_URL", "").strip() or cfg.api_url
     return cfg

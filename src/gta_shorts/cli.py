@@ -5,21 +5,30 @@
   gta-shorts vods CHANNEL           a channel's recent VODs and their viewer clips
   gta-shorts plan VOD               which stretches of a VOD would be clipped
   gta-shorts clip VOD               download those stretches and clip them
+  gta-shorts scan                   one watcher scan: track channels, queue ended VODs
+  gta-shorts watch                  the 24/7 loop: scan every poll_minutes, clip the queue
+  gta-shorts status                 what the watcher tracks, queued, made and spent
 """
 from __future__ import annotations
 
 import argparse
 import shutil
+import signal
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config as config_mod
 from .openshorts_client import OpenShorts
-from .pipeline import clip_vod, vod_link
-from .stretches import manual_stretch, plan_stretches
+from .pipeline import clip_vod, plan_vod, vod_link
+from .state import State, parse_iso
+from .stretches import manual_stretch
 from .timefmt import fmt_time, parse_time
 from .twitch import Helix, TwitchError, parse_vod_id
+
+
+def _log(msg: str) -> None:
+    print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}", flush=True)
 
 
 def _helix(cfg) -> Helix:
@@ -42,18 +51,16 @@ def _plan(cfg, args, vod, clips):
         if args.start is None or args.end is None:
             raise SystemExit("error: --start and --end go together")
         return [manual_stretch(parse_time(args.start), parse_time(args.end), clips)]
-    return plan_stretches(
-        clips, vod.duration,
-        length=(args.minutes or cfg.stretch_minutes) * 60,
-        count=args.stretches or cfg.stretches_per_vod,
-        lead=cfg.lead_seconds, min_clips=cfg.min_viewer_clips)
+    return plan_vod(cfg, vod, clips, count=args.stretches, minutes=args.minutes)
 
 
 def _print_plan(vod, clips, stretches):
     print(f"{vod.user_name}: {vod.title[:70]!r}")
-    print(f"  VOD {vod.id}, {fmt_time(vod.duration)} long, {len(clips)} viewer clip(s)")
+    muted = sum(d for _, d in vod.muted)
+    print(f"  VOD {vod.id}, {fmt_time(vod.duration)} long, {len(clips)} GTA VI viewer clip(s)"
+          + (f", {fmt_time(muted)} muted by Twitch" if muted else ""))
     if not stretches:
-        print("  No stretch has enough viewer clips. Pass --start/--end to pick one by hand.")
+        print("  No stretch has enough unmuted viewer clips. Pass --start/--end to pick one by hand.")
         return
     for i, st in enumerate(stretches, 1):
         print(f"  [{i}] {fmt_time(st.start)} -> {fmt_time(st.end)}  "
@@ -110,18 +117,20 @@ def cmd_vods(cfg, args) -> int:
     if not vods:
         print(f"{args.channel} has no saved VODs (disabled, expired, or never streamed).")
         return 0
+    gid = _game_id(cfg, helix)
     for v in vods:
         clips = helix.vod_clips(v)
-        top = clips[0].views if clips else 0
+        gta = [c for c in clips if not c.game_id or c.game_id == gid]
+        top = gta[0].views if gta else 0
         print(f"  {v.id}  {v.created_at[:16].replace('T', ' ')}  {fmt_time(v.duration):>8}  "
-              f"{len(clips):>4} clips (top {top:>6} views)  {v.title[:50]}")
+              f"{len(gta):>4}/{len(clips):<4} GTA VI clips (top {top:>6} views)  {v.title[:45]}")
     return 0
 
 
 def cmd_plan(cfg, args) -> int:
     helix = _helix(cfg)
     vod = helix.vod(_vod_id(args.vod))
-    clips = helix.vod_clips(vod)
+    clips = helix.vod_clips(vod, game_id=_game_id(cfg, helix))
     _print_plan(vod, clips, _plan(cfg, args, vod, clips))
     return 0
 
@@ -129,7 +138,7 @@ def cmd_plan(cfg, args) -> int:
 def cmd_clip(cfg, args) -> int:
     helix = _helix(cfg)
     vod = helix.vod(_vod_id(args.vod))
-    clips = helix.vod_clips(vod)
+    clips = helix.vod_clips(vod, game_id=_game_id(cfg, helix))
     stretches = _plan(cfg, args, vod, clips)
     _print_plan(vod, clips, stretches)
     if not stretches:
@@ -153,6 +162,85 @@ def cmd_clip(cfg, args) -> int:
     if failed:
         print(f"  {len(failed)} stretch(es) not done; re-run the same command to resume.")
     return 0 if not failed else 1
+
+
+def _watcher(cfg, args, state):
+    from .watch import Watcher
+    job_log = None if getattr(args, "quiet", True) else (lambda line: _log(f"      | {line}"))
+    return Watcher(cfg, _helix(cfg), OpenShorts(cfg.api_url), state, log=_log, job_log=job_log)
+
+
+def cmd_scan(cfg, args) -> int:
+    state = State(cfg.state_db)
+    try:
+        rep = _watcher(cfg, args, state).scan()
+    finally:
+        state.close()
+    print(rep.summary())
+    for line in rep.queued:
+        print(f"  queued   {line}")
+    for line in rep.skipped:
+        print(f"  skipped  {line}")
+    print(f"State: {cfg.state_db}  (`gta-shorts status` for the queue)")
+    return 0
+
+
+def cmd_watch(cfg, args) -> int:
+    def on_term(signum, frame):
+        raise KeyboardInterrupt          # docker stop: leave like Ctrl-C (state is already saved)
+    signal.signal(signal.SIGTERM, on_term)
+    state = State(cfg.state_db)
+    try:
+        _log(f"watching {cfg.game_name!r} (scan every {cfg.poll_minutes:g} min, "
+             f"cap {cfg.max_stretches_per_day} stretches/24 h); openshorts at {cfg.api_url}; "
+             f"state {cfg.state_db}")
+        _watcher(cfg, args, state).run(once=args.once)
+    finally:
+        state.close()
+    return 0
+
+
+def cmd_status(cfg, args) -> int:
+    if not cfg.state_db.exists():
+        print(f"No watcher state yet at {cfg.state_db} (run `gta-shorts scan` or `watch`).")
+        return 1
+    state = State(cfg.state_db, readonly=True)
+    try:
+        now = datetime.now(timezone.utc)
+        day = now - timedelta(hours=24)
+        last = state.get_meta("last_scan")
+        ago = f"{fmt_time((now - parse_iso(last)).total_seconds())} ago" if last else "never"
+        channels = state.tracked_channels(now, cfg.track_days)
+        prio = [c["login"] for c in channels if c["priority"]]
+        print(f"Last scan: {ago}.  Tracking {len(channels)} channel(s)"
+              + (f", priority: {', '.join(prio)}" if prio else ", no priority channels set"))
+        n, usd = state.usage_since(day)
+        usd_cap = f" / ${cfg.max_usd_per_day:.2f}" if cfg.max_usd_per_day is not None else ""
+        print(f"Last 24 h: {n}/{cfg.max_stretches_per_day} stretches submitted, "
+              f"${usd:.3f}{usd_cap} Gemini, {state.clip_count_since(day)} clip(s) made")
+        vods = state.counts("vods")
+        print("VODs: " + (", ".join(f"{k} {v}" for k, v in sorted(vods.items())) or "none"))
+        queue = state.queue(args.limit)
+        print(f"Queue ({sum(v for k, v in state.counts('stretches').items() if k in ('queued', 'processing'))}):")
+        for r in queue:
+            flag = "*" if r["priority"] else " "
+            extra = ""
+            if r["error"]:
+                when = f" after {r['next_try'][11:16]}Z" if r["next_try"] else ""
+                extra = f"  retry{when}: {r['error'][:60]}"
+            print(f"  {flag} {r['status']:<10} {r['login']:<18} {r['vod_id']} @ {fmt_time(r['start']):>8}  "
+                  f"{r['clips']:>3} clips {r['views']:>8,} views{extra}")
+        recent = state.finished_since(day)
+        if recent:
+            print("Finished in the last 24 h:")
+            for r in recent[:args.limit]:
+                what = (f"{r['clips_made']} clip(s)" if r["status"] == "done"
+                        else f"{r['status']}: {(r['error'] or '')[:70]}")
+                print(f"    {r['finished_at'][11:16]}Z {r['login']:<18} {r['vod_id']} @ "
+                      f"{fmt_time(r['start']):>8}  {what}")
+    finally:
+        state.close()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -181,11 +269,20 @@ def build_parser() -> argparse.ArgumentParser:
             c.add_argument("--dry-run", action="store_true", help="plan only, download nothing")
             c.add_argument("--keep-source", action="store_true", help="keep the downloaded stretch")
             c.add_argument("--quiet", action="store_true", help="hide openshorts job logs")
+
+    sub.add_parser("scan", help="one watcher scan (no clipping)")
+    w = sub.add_parser("watch", help="run the 24/7 loop")
+    w.add_argument("--once", action="store_true",
+                   help="one scan, clip what is ready, then exit")
+    w.add_argument("--quiet", action="store_true", help="hide openshorts job logs")
+    st = sub.add_parser("status", help="watcher queue, budget and recent results")
+    st.add_argument("--limit", type=int, default=10)
     return p
 
 
 COMMANDS = {"doctor": cmd_doctor, "discover": cmd_discover, "vods": cmd_vods,
-            "plan": cmd_plan, "clip": cmd_clip}
+            "plan": cmd_plan, "clip": cmd_clip, "scan": cmd_scan, "watch": cmd_watch,
+            "status": cmd_status}
 
 
 def main(argv=None) -> int:

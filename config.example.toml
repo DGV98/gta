@@ -29,3 +29,21 @@ max_height = 1080
 dir = "runs"
 credit = "🎥 twitch.tv/{login}"   # appended to every caption; {login} and {name} available
 keep_sources = false              # delete each downloaded stretch once clipped
+
+[watch]
+# Channels from your clipping programs (Twitch logins). Always tracked, whatever
+# they are playing, and clipped before anyone else.
+priority = []
+discover_top = 20             # look at this many top live GTA VI streams each scan
+min_viewers = 2000            # ...and track the ones with at least this many viewers
+track_days = 5                # forget a discovered channel not seen in GTA VI for this long
+poll_minutes = 30             # scan interval
+settle_minutes = 30           # after a stream ends, wait this long for viewers' clips
+max_vod_age_hours = 48        # don't clip streams that ended longer ago than this
+max_stretches_per_day = 12    # openshorts jobs per rolling 24 h (GPU time + Gemini)
+max_usd_per_day = 1.0         # Gemini spend per rolling 24 h, as openshorts reports it (0 = no cap)
+max_attempts = 3              # per stretch, then it is marked failed
+max_muted_fraction = 0.25     # skip stretches where Twitch muted more than this (DMCA music)
+min_free_gb = 20              # pause when the disk under output.dir gets this full
+keep_clip_days = 14           # delete finished clip files after this (manifests stay)
+# state_db = "state.db"       # relative to output.dir

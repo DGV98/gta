@@ -72,10 +72,28 @@ CREATE TABLE IF NOT EXISTS clips (             -- finished shorts, for posting (
     posted_at     TEXT,
     deleted_at    TEXT
 );
+CREATE TABLE IF NOT EXISTS posts (             -- clips going to TikTok (phase 3), one row per clip
+    path       TEXT PRIMARY KEY,               -- clips.path
+    status     TEXT NOT NULL,                  -- upload-post: posting | posted | inbox | retry | failed
+                                               -- folder: exported | manual | expired; either: skipped
+    file       TEXT,                           -- its copy's name in the to_post folder
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    request_id TEXT,                           -- Upload-Post request of the current attempt
+    privacy    TEXT,
+    started_at TEXT,                           -- current attempt; the daily cap counts these
+    sent_at    TEXT,                           -- its last upload (resent if never received)
+    posted_at  TEXT,
+    next_try   TEXT,
+    url        TEXT,
+    error      TEXT
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS stretches_queue ON stretches (status, priority, views);
 CREATE INDEX IF NOT EXISTS submissions_at ON submissions (at);
+CREATE INDEX IF NOT EXISTS posts_started ON posts (started_at);
 """
+# Posted, or on its way (in the folder): count toward caps and max_per_vod.
+LIVE_POSTS = ("posting", "posted", "inbox", "exported", "manual")
 
 
 def iso(dt: datetime) -> str:
@@ -229,6 +247,114 @@ class State:
 
     def mark_clip_deleted(self, path: str, now: datetime) -> None:
         self.db.execute("UPDATE clips SET deleted_at = ? WHERE path = ?", (iso(now), path))
+
+    # -- posting (phase 3) ------------------------------------------------
+    _PRIORITY = "COALESCE((SELECT MAX(ch.priority) FROM channels ch WHERE ch.login = c.login), 0)"
+    _CLIP_POST = ("SELECT c.*, p.status AS post_status, COALESCE(p.attempts, 0) AS post_attempts, "
+                  f"{_PRIORITY} AS priority FROM clips c LEFT JOIN posts p ON p.path = c.path ")
+
+    def clip_for_post(self, path: str) -> Optional[sqlite3.Row]:
+        return self._one(self._CLIP_POST + "WHERE c.path = ?", (path,))
+
+    def clips_to_post(self, now: datetime, *, since: datetime, min_score: int, max_per_vod: int,
+                      avoid_login: Optional[str] = None, priority_only: bool = False,
+                      limit: int = 1) -> List[sqlite3.Row]:
+        """Unposted clips in posting order: priority channels, then not the
+        streamer of the last post, then the best score."""
+        live = ", ".join(f"'{s}'" for s in LIVE_POSTS)
+        return self._all(
+            self._CLIP_POST +
+            "WHERE c.deleted_at IS NULL AND c.posted_at IS NULL AND c.created_at >= ? "
+            "AND COALESCE(c.score, 0) >= ? "
+            + (f"AND {self._PRIORITY} = 1 " if priority_only else "") +
+            "AND (p.path IS NULL OR (p.status = 'retry' AND (p.next_try IS NULL OR p.next_try <= ?))) "
+            "AND (SELECT COUNT(*) FROM posts p2 JOIN clips c2 ON c2.path = p2.path "
+            f"     WHERE c2.vod_id = c.vod_id AND p2.status IN ({live})) < ? "
+            "ORDER BY priority DESC, c.login = ?, c.score DESC, c.created_at DESC LIMIT ?",
+            (iso(since), int(min_score), iso(now), int(max_per_vod), avoid_login or "", limit))
+
+    def unposted_counts(self, since: datetime, min_score: int,
+                        priority_only: bool = False) -> Tuple[int, int]:
+        """(clips at min_score or above, clips below) not posted or given up on yet."""
+        row = self._one(
+            "SELECT COALESCE(SUM(COALESCE(c.score, 0) >= ?), 0) AS ok, "
+            "COALESCE(SUM(COALESCE(c.score, 0) < ?), 0) AS low FROM clips c "
+            "LEFT JOIN posts p ON p.path = c.path WHERE c.deleted_at IS NULL "
+            "AND c.posted_at IS NULL AND c.created_at >= ? AND (p.path IS NULL OR p.status = 'retry')"
+            + (f" AND {self._PRIORITY} = 1" if priority_only else ""),
+            (int(min_score), int(min_score), iso(since)))
+        return int(row["ok"]), int(row["low"])
+
+    def post(self, path: str) -> Optional[sqlite3.Row]:
+        return self._one("SELECT * FROM posts WHERE path = ?", (path,))
+
+    def post_in_flight(self) -> Optional[sqlite3.Row]:
+        return self._one("SELECT * FROM posts WHERE status = 'posting' ORDER BY started_at LIMIT 1")
+
+    def start_post(self, path: str, request_id: str, attempts: int, privacy: str,
+                   now: datetime) -> None:
+        self.db.execute(
+            "INSERT INTO posts(path, status, attempts, request_id, privacy, started_at, sent_at) "
+            "VALUES (?, 'posting', ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
+            "status = 'posting', attempts = excluded.attempts, request_id = excluded.request_id, "
+            "privacy = excluded.privacy, started_at = excluded.started_at, "
+            "sent_at = excluded.sent_at, next_try = NULL",
+            (path, attempts, request_id, privacy, iso(now), iso(now)))
+
+    def update_post(self, path: str, **fields) -> None:
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        self.db.execute(f"UPDATE posts SET {cols} WHERE path = ?", (*fields.values(), path))
+
+    def finish_post(self, path: str, status: str, now: datetime, *, url: Optional[str] = None,
+                    error: Optional[str] = None) -> None:
+        """``posted`` (or ``inbox``: TikTok holds it as a draft for you to publish)."""
+        self.update_post(path, status=status, posted_at=iso(now), url=url, error=error)
+        self.db.execute("UPDATE clips SET posted_at = ? WHERE path = ?", (iso(now), path))
+
+    def export_post(self, path: str, file: str, now: datetime) -> None:
+        self.db.execute(
+            "INSERT INTO posts(path, status, file, started_at) VALUES (?, 'exported', ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET status = 'exported', file = excluded.file, "
+            "started_at = excluded.started_at, next_try = NULL",
+            (path, file, iso(now)))
+
+    def exported(self) -> List[sqlite3.Row]:
+        """Clips in the to_post folder, oldest first."""
+        return self._all("SELECT p.*, c.login, c.score, c.hook, c.created_at FROM posts p "
+                         "JOIN clips c ON c.path = p.path WHERE p.status = 'exported' "
+                         "ORDER BY p.started_at, p.file")
+
+    def skip_post(self, path: str, reason: str) -> None:
+        self.db.execute(
+            "INSERT INTO posts(path, status, error) VALUES (?, 'skipped', ?) "
+            "ON CONFLICT(path) DO UPDATE SET status = 'skipped', error = excluded.error",
+            (path, reason))
+
+    def live_posts_since(self, since: datetime) -> List[sqlite3.Row]:
+        """Posts that count toward the daily cap, oldest first."""
+        live = ", ".join(f"'{s}'" for s in LIVE_POSTS)
+        return self._all(f"SELECT * FROM posts WHERE status IN ({live}) AND started_at >= ? "
+                         "ORDER BY started_at", (iso(since),))
+
+    def last_live_post(self) -> Optional[sqlite3.Row]:
+        live = ", ".join(f"'{s}'" for s in LIVE_POSTS)
+        return self._one(
+            f"SELECT p.*, c.login FROM posts p JOIN clips c ON c.path = p.path "
+            f"WHERE p.status IN ({live}) ORDER BY p.started_at DESC, p.file DESC, p.rowid DESC "
+            "LIMIT 1")
+
+    def count_finished(self, status: str, since: datetime) -> int:
+        return int(self._one("SELECT COUNT(*) AS n FROM posts WHERE status = ? AND posted_at >= ?",
+                             (status, iso(since)))["n"])
+
+    def recent_posts(self, since: datetime) -> List[sqlite3.Row]:
+        return self._all(
+            "SELECT p.*, c.login, c.score, c.hook FROM posts p JOIN clips c ON c.path = p.path "
+            "WHERE p.started_at >= ? ORDER BY p.started_at DESC", (iso(since),))
+
+    def has_table(self, name: str) -> bool:
+        return self._one("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                         (name,)) is not None
 
     # -- reporting --------------------------------------------------------
     def counts(self, table: str) -> Dict[str, int]:

@@ -47,3 +47,26 @@ max_muted_fraction = 0.25     # skip stretches where Twitch muted more than this
 min_free_gb = 20              # pause when the disk under output.dir gets this full
 keep_clip_days = 14           # delete finished clip files after this (manifests stay)
 # state_db = "state.db"       # relative to output.dir
+
+[post]
+# Phase 3: the poster container picks the best finished clips for TikTok.
+#   "folder":      keeps them in runs/to_post with a .txt caption each; you upload
+#                  them by hand and take each one out of the folder once it's up
+#   "upload-post": posts them for you through upload-post.com (paid plan;
+#                  UPLOAD_POST_API_KEY in .env and the settings further down)
+#   "off":         neither
+mode = "folder"
+folder_size = 6               # folder mode: how many clips wait in runs/to_post
+min_score = 70                # openshorts' 0-100 score; the profile calls 70+ HIGH
+max_per_vod = 3               # at most this many clips from one stream
+max_age_hours = 72            # skip clips made longer ago (in the folder: swapped for newer ones)
+priority_only = false         # true: only [watch] priority channels (your clipping programs)
+
+# upload-post mode only. Try `gta-shorts post --once --private` first.
+user = ""                     # your Upload-Post profile name (Manage Users), not the TikTok handle
+per_day = 6                   # posts per rolling 24 h (TikTok allows about 15 through any app)
+min_gap_minutes = 120         # at least this long between two posts
+hours = [9, 23]               # only start posts between these local hours ([0, 24] = any time)
+timezone = "America/New_York" # your audience's time zone, for `hours`
+privacy = "PUBLIC_TO_EVERYONE"  # or FOLLOWER_OF_CREATOR, MUTUAL_FOLLOW_FRIENDS, SELF_ONLY
+max_attempts = 3              # per clip, then it is marked failed

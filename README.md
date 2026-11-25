@@ -18,11 +18,17 @@ openshorts (GPU, Docker): transcribe → Gemini picks moments
    ▼
 runs/<date>_<streamer>_<vod>/manifest.json + clipNN.mp4
 (captions with streamer credit, VOD timestamps, scores; clips listed in state.db)
+   │
+   ▼
+poster: the best clips ──> runs/to_post/ + captions, you upload them by hand
+                       └─> or Upload-Post posts them to TikTok for you
 ```
 
 - Phase 1: clip VODs by hand and tune quality (`plan`, `clip`).
 - Phase 2: the watcher does it 24/7 (`scan`, `watch`, `status`).
-- Phase 3 (next): posting via Upload-Post and the daily Discord digest.
+- Phase 3: the poster gets the best clips onto TikTok: in a folder for you to
+  upload, or through Upload-Post (`posts`, `post`, `skip`). Still to do: the
+  daily Discord digest.
 
 ## What is patched in openshorts
 
@@ -89,7 +95,7 @@ applies `patches/`. Upstream's own test suite passes with both patches.
      the machine isn't restarted mid-job (a restart is safe, just slow:
      everything resumes).
    - Test it once: reboot, wait for Docker Desktop, then `docker ps` should
-     list `openshorts-backend` and `gta-shorts-watcher`.
+     list `openshorts-backend`, `gta-shorts-watcher` and `gta-shorts-poster`.
 
 ## Phase 1: clip real VODs by hand
 
@@ -162,7 +168,8 @@ uv run gta-shorts status          # tracked channels, queue, last 24 h: jobs, $,
 ```
 
 `scripts/up.sh` is also how you apply changes: after a `git pull`, a
-`config.toml` edit or a profile edit, run it again. Stop the watcher with
+`config.toml` edit or a profile edit, run it again (it restarts the watcher
+and poster, since they read `config.toml` only at start). Stop the watcher with
 `docker compose stop watcher`. All state is in `runs/`, so stopping, crashing
 or rebooting loses nothing: a running job is polled again, and a half-done
 stretch carries on.
@@ -170,6 +177,82 @@ stretch carries on.
 The first scan queues every hot stretch from the last `max_vod_age_hours`
 of all tracked channels. The daily cap spreads them out, and stretches that
 go stale before their turn are dropped.
+
+## Phase 3: posting to TikTok
+
+The poster container (`gta-shorts post`) picks the best finished clips. In
+the same order for both modes: priority channels first, then a different
+streamer than the last one, then openshorts' score. It only takes clips with
+a score of at least `min_score`, made in the last `max_age_hours`, and at most
+`max_per_vod` from one stream. With `priority_only = true` it takes only your
+`[watch] priority` channels. `[post] mode` says what happens to them:
+
+- `folder` (the default): you upload them by hand.
+- `upload-post`: it posts them for you through Upload-Post (paid).
+- `off`: neither.
+
+The caption is the clip's `captions.tiktok` in its `manifest.json`
+(openshorts' description, then the streamer credit). `uv run gta-shorts posts`
+shows what's next and what went out. `uv run gta-shorts skip <clip>` keeps one
+off TikTok.
+
+### Folder mode: upload by hand
+
+`runs/to_post/` always holds the next `folder_size` clips (6 by default),
+numbered in the order they came in. Each has a `.txt` with the caption to paste.
+
+1. Open the folder from Ubuntu with `explorer.exe "$(wslpath -w runs/to_post)"`,
+   and pin it to *Quick access* in File Explorer.
+2. Upload a clip at https://www.tiktok.com/upload (or from your phone), and
+   paste the caption from its `.txt`.
+3. Delete the clip from the folder, or move it somewhere else. It now counts as
+   posted, and within a minute the next clip takes its place. Its `.txt` goes too.
+
+To drop a clip without counting it as posted, use
+`uv run gta-shorts skip 0003_name.mp4`. A clip left in the folder longer than
+`max_age_hours` is swapped for a newer one. `uv run gta-shorts post --once`
+tops the folder up right away, without the container.
+
+### Upload-Post mode: fully automatic
+
+TikTok only lets apps it has audited post publicly, and its guidelines rule
+out auditing "a utility tool to help upload contents to the account(s) you or
+your team manages". An app of our own could only post private videos. So
+this mode goes through [Upload-Post](https://upload-post.com), whose TikTok app
+is audited. TikTok isn't on its free plan: Basic is $24/month ($16 billed
+yearly). TikTok also caps posts made through any app at about 15 per account
+per day.
+
+1. On app.upload-post.com: pick a paid plan, then *Manage Users* → create a
+   profile (e.g. `gta`) and connect your TikTok account to it. Then *API Keys*
+   → *Generate New API Key*.
+2. `.env`: `UPLOAD_POST_API_KEY=...`. `config.toml`, section `[post]`:
+   `mode = "upload-post"` and `user = "gta"` (the profile name, not your TikTok
+   handle). The rest of `[post]` is the schedule; see `config.example.toml`.
+3. `uv run gta-shorts doctor`: the Upload-Post lines say `[ok]`.
+4. `uv run gta-shorts post --once --private` posts the top clip now as
+   *only me*, so you can check how it looks on TikTok.
+5. `scripts/up.sh`, then follow it with `docker compose logs -f poster`.
+
+How it works:
+
+- **Pace:** `per_day` posts per rolling 24 h, at least `min_gap_minutes`
+  apart, only between `hours` in `timezone`.
+- **Failures:** a failed post is retried after 30 and then 60 min, then marked
+  failed. A file TikTok rejects is not retried. Account problems pause all
+  posting for an hour and don't use up the clip's attempts: a bad key, the free
+  plan, a daily cap, or TikTok needing to be reconnected. `posts` and `status`
+  show the reason.
+- **Never twice:** each attempt has its own Upload-Post request id, saved
+  before the upload. After a crash, restart or timeout, the poster asks
+  Upload-Post about that request instead of uploading again.
+- **Inbox:** rarely, TikTok puts the video in your TikTok inbox as a draft
+  instead of publishing it (status `inbox` in `posts`). Publish it from the
+  TikTok app.
+
+Switching modes or stopping: change `mode` and run `scripts/up.sh` (a post
+already under way still finishes), or `docker compose stop poster` for a quick
+pause.
 
 ## Upkeep
 

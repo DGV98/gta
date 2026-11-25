@@ -1,80 +1,134 @@
-# To do on the Windows PC
+# Set up and start posting clips
 
-Work through these in order. Lines in `code` are commands to paste. Unless a
-step says PowerShell, paste them into the **Ubuntu** window. Once the project
-is installed (step 3), type `cd ~/gta` every time you open Ubuntu, before
-running anything. If a step goes wrong, README.md has more detail.
+Setup takes about an hour, mostly waiting for things to install. After that,
+the PC finds GTA VI streams by itself, cuts the best moments into clips, and
+puts them in a folder for you to post on TikTok.
 
-## 1. Get these ready first
+**How to use this list**
+
+- Do the steps in order and tick them off as you go.
+- Text `like this` is a command. Copy it, paste it into the window the step
+  names, and press Enter. To paste in Ubuntu, right-click.
+- From step 3 on, every time you open Ubuntu, run `cd ~/gta` first.
+- Some steps open a text editor called nano. To save and close it, press Ctrl+O,
+  then Enter, then Ctrl+X.
+- Stuck? Send me what's on the screen (a screenshot is fine).
+
+## 1. Get your keys (in your web browser)
+
+Paste each one into Notepad as you go. You'll need them in step 4.
 
 - [ ] **Twitch keys.** Go to https://dev.twitch.tv/console and click *Register
-      Your Application*. Use any name, put `http://localhost` as the OAuth
-      redirect URL, choose category *Other* and client type *Confidential*.
-      Copy the **Client ID**, then click *New Secret* and copy the **Client Secret**.
-- [ ] **Gemini key.** Create one at https://aistudio.google.com/app/apikey.
-- [ ] **Your streamers.** Write down the Twitch usernames of the streamers
-      from your clipping programs.
+      Your Application*. If Twitch asks, turn on two-factor authentication first.
+      - Name: anything, for example `gta-shorts-` plus your name
+      - OAuth Redirect URL: `http://localhost`
+      - Category: *Other*. Client type: *Confidential*.
+      Then click *Manage* next to the app. Copy the **Client ID**, click
+      *New Secret*, and copy the **Client Secret**.
+- [ ] **Gemini key.** Go to https://aistudio.google.com/app/apikey, click
+      *Create API key*, and copy it.
+- [ ] **Your streamers.** Write down the Twitch usernames of the streamers in your
+      clipping programs (the part after `twitch.tv/` in their link).
 
-## 2. Set up Windows
+## 2. Install Ubuntu and Docker (on Windows)
 
-- [ ] Update the NVIDIA graphics driver (GeForce Experience or nvidia.com).
-- [ ] Open **PowerShell as administrator** and run `wsl --install -d Ubuntu-24.04`.
-      Restart the PC, then pick a username and password when Ubuntu asks.
-- [ ] Install **Docker Desktop**, then open its Settings:
-  - General: tick *Use the WSL 2 based engine* and *Start Docker Desktop when you sign in*.
-  - Resources → WSL integration: turn on *Ubuntu-24.04*.
-- [ ] So the PC can run 24/7:
-  - Power settings: set *Sleep* to **Never**.
-  - Sign in automatically after a restart: press Win+R, type `netplwiz` and
-    untick *Users must enter a user name and password*.
-  - Windows Update: set your active hours so updates don't restart the PC whenever they like.
+- [ ] Right-click the Start button and choose *Terminal (Admin)*. Run:
+      `wsl --install -d Ubuntu-24.04`
+      Restart the PC if it asks. When the Ubuntu window opens, choose a username
+      and password. The password stays invisible while you type, which is normal.
+      Don't forget it.
+- [ ] Download **Docker Desktop** from https://www.docker.com/products/docker-desktop/
+      and install it with the default options. Open it (you can skip signing in),
+      then click the gear icon to open Settings:
+      - *General*: tick *Use the WSL 2 based engine* and *Start Docker Desktop when
+        you sign in to your computer*.
+      - *Resources → WSL integration*: switch on *Ubuntu-24.04*.
+      - Click *Apply & restart*.
+
+Your graphics card driver is already up to date, so there's nothing to do there.
 
 ## 3. Install the project (in Ubuntu)
 
 Open **Ubuntu** from the Start menu.
 
 - [ ] `sudo apt update && sudo apt install -y git ffmpeg gh`
-- [ ] `curl -LsSf https://astral.sh/uv/install.sh | sh`, then close Ubuntu and open it again.
-- [ ] Check that Docker can see the graphics card. It should print a table with your card's name:
+      (it asks for your Ubuntu password)
+- [ ] `curl -LsSf https://astral.sh/uv/install.sh | sh`
+      Then close Ubuntu and open it again.
+- [ ] Check that Docker can use your graphics card:
       `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi`
-- [ ] Download the code: `gh auth login` (follow the prompts), then
-      `gh repo clone <your-github-name>/<repo-name> ~/gta`
-- [ ] `cd ~/gta && uv sync`
+      You should see a table that mentions *RTX 4070 Ti SUPER*. If you get an
+      error instead, stop and send it to me.
+- [ ] `gh auth login`
+      Press Enter to accept each choice. When it shows a code, open
+      https://github.com/login/device, type the code, and approve.
+- [ ] `gh repo clone DGV98/gta ~/gta && cd ~/gta && uv sync`
 
-## 4. Add your keys and settings
+## 4. Add your keys (in Ubuntu)
 
-To save in nano: Ctrl+O, then Enter, then Ctrl+X.
-
-- [ ] `cp .env.example .env && nano .env`. Paste in the Twitch Client ID and Secret.
-- [ ] `cp config.example.toml config.toml && nano config.toml`. Under `[watch]`, add
-      your streamers, like this: `priority = ["streamer1", "streamer2"]`.
+- [ ] `cp .env.example .env && nano .env`
+      Paste your Twitch Client ID after `TWITCH_CLIENT_ID=` and the secret after
+      `TWITCH_CLIENT_SECRET=`. Leave the other line empty. Save and close.
+- [ ] `cp config.example.toml config.toml && nano config.toml`
+      Press Ctrl+W, type `priority`, and press Enter to jump to the line
+      `priority = []`. Put your streamers in it like this:
+      `priority = ["streamer1", "streamer2"]`. Save and close.
+      (Optional: to post *only* those streamers, find `priority_only = false`
+      further down and change it to `true`.)
 - [ ] `scripts/setup_openshorts.sh --gpu`
-- [ ] `nano openshorts/.env`. Fill in `GEMINI_API_KEY`, `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
+- [ ] `nano openshorts/.env`
+      Fill in `GEMINI_API_KEY=`, `TWITCH_CLIENT_ID=` and `TWITCH_CLIENT_SECRET=`.
+      The two Twitch values are the same ones as before. Save and close.
 
-## 5. Try it by hand on 2-3 streams
+## 5. Start it (in Ubuntu)
 
-- [ ] Start openshorts. The first time takes 10-20 minutes:
-      `cd openshorts && docker compose up --build -d backend frontend && cd ..`
-- [ ] `uv run gta-shorts doctor`. Every line should say `[ok]`.
-- [ ] `uv run gta-shorts discover` shows who's streaming GTA VI right now.
-- [ ] `uv run gta-shorts vods <streamer>` lists their past streams. Copy one of the ID numbers.
-- [ ] `uv run gta-shorts clip <id>` makes the clips.
-- [ ] Watch the clips: `explorer.exe runs` opens the folder in Windows.
-- [ ] Send me:
-  - what looks good or bad in the clips
-  - the `manifest.json` files from `runs/`
-  - your graphics card model
+- [ ] `scripts/up.sh`
+      The first time takes 10-20 minutes. After that it keeps running in the
+      background, even after you close Ubuntu.
+- [ ] `uv run gta-shorts doctor`
+      Every line should say `[ok]`. If the openshorts line says FAIL, wait a few
+      minutes and run it again. If anything else says FAIL, send me the output.
+- [ ] `uv run gta-shorts status` shows the streams it found and what it's working
+      on. Run it any time.
 
-## 6. Turn on 24/7 mode
+## 6. Post your first clips
 
-- [ ] `uv run gta-shorts scan` shows what it would pick up. It doesn't make anything yet.
-- [ ] `scripts/up.sh` starts everything. It keeps running after you close Ubuntu.
-- [ ] `docker compose logs -f watcher` shows what it's doing. Press Ctrl+C to stop
-      watching; the watcher itself keeps running.
-- [ ] `uv run gta-shorts status` shows the queue, what it made and what it spent today. Run it any time.
+Finished clips show up in a folder called `to_post`. The first ones can take an
+hour or two to appear.
 
-## 7. Check that it survives a restart
+- [ ] `uv run gta-shorts posts` shows how many clips are in the folder.
+- [ ] Open the folder: `explorer.exe "$(wslpath -w runs)"`
+      In the window that opens, right-click *to_post* and choose *Pin to Quick
+      access*. Next time you can open it straight from File Explorer.
+- [ ] For each clip:
+      1. Watch it. If you don't like it, just delete it and move on.
+      2. Upload it at https://www.tiktok.com/upload (or from your phone).
+      3. Open the `.txt` file with the same name, copy all of it, and paste it in
+         as the caption. It already credits the streamer.
+      4. Delete the clip from the folder. That tells the system it's done, and a
+         new clip takes its place within a minute.
 
-- [ ] Restart Windows and wait a few minutes. Then open Ubuntu and run `docker ps`.
-      You should see `openshorts-backend` and `gta-shorts-watcher` listed.
-      If they're missing, tell me.
+A few posts spread across the day usually do better than many at once. The
+TikTok uploader also lets you schedule posts.
+
+## 7. Keep it running when you're away
+
+- [ ] Stop the PC from sleeping: Settings → System → Power → set sleep to *Never*.
+- [ ] Sign in automatically after a restart: press Win+R, type `netplwiz`, press
+      Enter, untick *Users must enter a user name and password to use this
+      computer*, click OK, and type your password.
+      If that box isn't there: Settings → Accounts → Sign-in options, turn off
+      *For improved security, only allow Windows Hello sign-in...*, then try again.
+- [ ] Settings → Windows Update → Advanced options → *Active hours*: set them as
+      wide as Windows allows, so it restarts less often.
+- [ ] Test it: restart Windows, wait 5 minutes, open Ubuntu and run `docker ps`.
+      You should see `gta-shorts-watcher`, `gta-shorts-poster` and
+      `openshorts-backend`. If one is missing, tell me.
+
+## From now on
+
+- **Every day:** open *to_post*, post the clips you like, and delete each one
+  from the folder once it's up.
+- **When I send you an update:** in Ubuntu, run
+  `cd ~/gta && git pull && scripts/up.sh`.
+- **Tell me** which clips were good or bad, and why. That's how I tune what it picks.

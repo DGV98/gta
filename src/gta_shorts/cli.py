@@ -8,6 +8,10 @@
   gta-shorts scan                   one watcher scan: track channels, queue ended VODs
   gta-shorts watch                  the 24/7 loop: scan every poll_minutes, clip the queue
   gta-shorts status                 what the watcher tracks, queued, made and spent
+  gta-shorts posts                  what goes to TikTok next, and what was posted
+  gta-shorts post                   the 24/7 poster: fill runs/to_post, or post via Upload-Post
+  gta-shorts post --once            one round now (fill the folder / post the next clip)
+  gta-shorts skip CLIP              never post that clip (path, or its name in to_post/)
 """
 from __future__ import annotations
 
@@ -18,13 +22,16 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
+
 from . import config as config_mod
 from .openshorts_client import OpenShorts
 from .pipeline import clip_vod, plan_vod, vod_link
-from .state import State, parse_iso
+from .state import LIVE_POSTS, State, parse_iso
 from .stretches import manual_stretch
 from .timefmt import fmt_time, parse_time
 from .twitch import Helix, TwitchError, parse_vod_id
+from .upload_post import UploadPost, UploadPostError
 
 
 def _log(msg: str) -> None:
@@ -93,6 +100,27 @@ def cmd_doctor(cfg, args) -> int:
     api = OpenShorts(cfg.api_url)
     check(f"openshorts at {cfg.api_url}", api.healthy(),
           "cd openshorts && docker compose up -d; first build takes a while")
+    if cfg.post_mode == "upload-post" or cfg.upload_post_api_key:
+        check("UPLOAD_POST_API_KEY set", bool(cfg.upload_post_api_key),
+              "app.upload-post.com -> API Keys; put it in .env")
+        check("[post] user set", bool(cfg.post_user),
+              "your Upload-Post profile name (Manage Users), not the TikTok handle")
+        if cfg.upload_post_api_key:
+            up = UploadPost(cfg.upload_post_api_key)
+            try:
+                plan = str(up.me().get("plan") or "?")
+                check(f"Upload-Post key works (plan: {plan})", plan.lower() != "free",
+                      "TikTok posting needs a paid Upload-Post plan")
+                if cfg.post_user:
+                    tiktok = up.tiktok_account(cfg.post_user)
+                    who = (tiktok or {}).get("handle") or (tiktok or {}).get("display_name") or ""
+                    check(f"TikTok connected to profile {cfg.post_user!r}"
+                          + (f" (@{who})" if who else ""),
+                          bool(tiktok) and not tiktok.get("reauth_required"),
+                          "connect or reconnect it at app.upload-post.com/manage-users")
+            except (UploadPostError, httpx.HTTPError) as e:
+                check("Upload-Post API", False, str(e))
+    print(f"  posting: {_mode_text(cfg)}")
     print(f"  output dir: {cfg.output_dir}")
     return 0 if ok else 1
 
@@ -238,6 +266,174 @@ def cmd_status(cfg, args) -> int:
                         else f"{r['status']}: {(r['error'] or '')[:70]}")
                 print(f"    {r['finished_at'][11:16]}Z {r['login']:<18} {r['vod_id']} @ "
                       f"{fmt_time(r['start']):>8}  {what}")
+        if state.has_table("posts"):
+            print(_posting_line(cfg, state, now) + "  (`gta-shorts posts` for details)")
+    finally:
+        state.close()
+    return 0
+
+
+# -- posting (phase 3) ----------------------------------------------------
+def _poster(cfg, state):
+    from .post import Poster
+    return Poster(cfg, UploadPost(cfg.upload_post_api_key), state, log=_log)
+
+
+def _outbox(cfg, state):
+    from .post import Outbox
+    return Outbox(cfg, state, log=_log)
+
+
+def _mode_text(cfg) -> str:
+    if cfg.post_mode == "folder":
+        return (f"folder mode: the next {cfg.post_folder_size} clips wait in "
+                f"{cfg.output_dir / 'to_post'} for you to upload")
+    if cfg.post_mode == "upload-post":
+        return (f"through Upload-Post, {cfg.post_per_day}/24 h, {cfg.post_min_gap_minutes:g}+ min "
+                f"apart, {cfg.post_hours[0]}-{cfg.post_hours[1]} h {cfg.post_timezone}, "
+                f"{cfg.post_privacy}")
+    return 'off ([post] mode = "off")'
+
+
+def _posting_line(cfg, state, now) -> str:
+    day = now - timedelta(hours=24)
+    ok, low = state.unposted_counts(now - timedelta(hours=cfg.post_max_age_hours),
+                                    cfg.post_min_score, cfg.post_priority_only)
+    waiting = f"{ok} clip(s) waiting (score {cfg.post_min_score}+), {low} below"
+    if cfg.post_mode == "folder":
+        return (f"Posting: folder mode, {len(state.exported())}/{cfg.post_folder_size} clip(s) in "
+                f"to_post/, {state.count_finished('manual', day)} taken out in the last 24 h, "
+                f"{waiting} more")
+    if cfg.post_mode == "off":
+        return f"Posting: OFF, {waiting}"
+    line = (f"Posting: through Upload-Post, {len(state.live_posts_since(day))}/{cfg.post_per_day} "
+            f"posted in the last 24 h, {waiting}")
+    until = state.get_meta("post_paused_until")
+    if until and now < parse_iso(until):
+        line += f"; PAUSED until {until[11:16]}Z: {state.get_meta('post_pause_reason')}"
+    return line
+
+
+def _post_result(r) -> str:
+    if r["status"] == "posted":
+        return r["url"] or "posted (TikTok link not ready)"
+    if r["status"] == "exported":
+        return f"waiting in to_post/ as {r['file']}"
+    if r["status"] == "manual":
+        return "taken out of to_post/ (counted as posted)"
+    return r["status"] + (f": {r['error'][:80]}" if r["error"] else "")
+
+
+def cmd_posts(cfg, args) -> int:
+    state = State(cfg.state_db)
+    try:
+        now = datetime.now(timezone.utc)
+        poster = _poster(cfg, state)
+        print(_posting_line(cfg, state, now))
+        if cfg.post_mode == "folder":
+            folder = state.exported()
+            print(f"In {cfg.output_dir / 'to_post'}:" if folder else
+                  f"{cfg.output_dir / 'to_post'} is empty (the poster fills it every minute).")
+            for r in folder:
+                print(f"  {r['file']}  (score {r['score'] or '?'})")
+        elif cfg.post_mode == "upload-post":
+            print(f"  as {cfg.post_privacy} on Upload-Post profile {cfg.post_user or '(not set)'}, "
+                  f"{cfg.post_min_gap_minutes:g}+ min apart, {cfg.post_hours[0]}:00-"
+                  f"{cfg.post_hours[1]}:00 {cfg.post_timezone}")
+            ok, why, _ = poster.due(now)
+            print("  next post: " + ("as soon as the poster checks" if ok else why))
+        recent = [r for r in state.recent_posts(now - timedelta(days=args.days))
+                  if r["status"] != "exported"]
+        if recent:
+            print(f"Last {args.days:g} day(s):")
+            for r in recent[:args.limit]:
+                when = poster.local(parse_iso(r["started_at"]))
+                print(f"  {when}  {r['login']:<16} {r['score'] or '?':>3}  {r['path']}\n"
+                      f"      {_post_result(r)}")
+        last = state.last_live_post()
+        nxt = state.clips_to_post(now, since=now - timedelta(hours=cfg.post_max_age_hours),
+                                  min_score=cfg.post_min_score, max_per_vod=cfg.post_max_per_vod,
+                                  avoid_login=last["login"] if last is not None else None,
+                                  priority_only=cfg.post_priority_only, limit=args.limit)
+        print("Up next:" if nxt else "Up next: nothing (no unposted clip qualifies).")
+        for r in nxt:
+            flag = "*" if r["priority"] else " "
+            retry = f"  (attempt {r['post_attempts'] + 1})" if r["post_attempts"] else ""
+            print(f"  {flag} {r['score'] or '?':>3}  {r['login']:<16} {r['path']}{retry}\n"
+                  f"        {r['hook'] or ''}")
+    finally:
+        state.close()
+    return 0
+
+
+def cmd_post(cfg, args) -> int:
+    def on_term(signum, frame):
+        raise KeyboardInterrupt          # docker stop: an in-flight post is resumed next start
+    if (args.clip or args.private) and not (args.once and cfg.post_mode == "upload-post"):
+        raise SystemExit('error: --clip and --private go with --once and mode = "upload-post"')
+    signal.signal(signal.SIGTERM, on_term)
+    state = State(cfg.state_db)
+    try:
+        poster = _poster(cfg, state)
+        if not args.once:
+            _log(f"poster: {_mode_text(cfg)}; clips scoring {cfg.post_min_score}+; "
+                 f"state {cfg.state_db}")
+            poster.run()
+            return 0
+        if cfg.post_mode == "off":
+            print('error: posting is off ([post] mode = "off")', file=sys.stderr)
+            return 2
+        if cfg.post_mode == "folder":
+            added = _outbox(cfg, state).sync()
+            print(f"Added {len(added)} clip(s). In {cfg.output_dir / 'to_post'}:")
+            for r in state.exported():
+                print(f"  {r['file']}  (score {r['score'] or '?'})")
+            return 0
+        missing = poster.missing()
+        if missing:
+            print(f"error: {missing}", file=sys.stderr)
+            return 2
+        if args.clip:
+            clip = state.clip_for_post(args.clip)
+            if clip is None:
+                print(f"error: no clip {args.clip!r} in {cfg.state_db} "
+                      "(paths as `gta-shorts posts` prints them)", file=sys.stderr)
+                return 2
+            if clip["post_status"] in LIVE_POSTS:
+                print(f"error: {args.clip} is already {clip['post_status']}", file=sys.stderr)
+                return 1
+        else:
+            clip = poster.pick(datetime.now(timezone.utc))
+            if clip is None:
+                print("Nothing to post: no unposted clip qualifies (see `gta-shorts posts`).")
+                return 1
+        row = poster.post_now(clip, privacy="SELF_ONLY" if args.private else None)
+        if row["status"] in ("posted", "inbox"):
+            print(f"{row['status']}: {row['url'] or row['error'] or 'TikTok link not ready yet'}")
+            return 0
+        print(f"{row['status']}: {row['error'] or 'no answer yet; `gta-shorts posts` shows it later'}")
+        return 1
+    finally:
+        state.close()
+
+
+def cmd_skip(cfg, args) -> int:
+    state = State(cfg.state_db)
+    try:
+        in_folder = {r["file"]: r["path"] for r in state.exported()}
+        for arg in args.clips:
+            path = in_folder.get(Path(arg).name, arg)
+            clip = state.clip_for_post(path)
+            if clip is None:
+                print(f"  no clip {path!r}")
+            elif clip["post_status"] == "exported":
+                _outbox(cfg, state).skip(state.post(path))
+                print(f"  {path}: taken out of to_post/, won't be posted")
+            elif clip["post_status"] in LIVE_POSTS:
+                print(f"  {path} is already {clip['post_status']}")
+            else:
+                state.skip_post(path, "skipped by hand")
+                print(f"  {path}: won't be posted")
     finally:
         state.close()
     return 0
@@ -277,12 +473,26 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--quiet", action="store_true", help="hide openshorts job logs")
     st = sub.add_parser("status", help="watcher queue, budget and recent results")
     st.add_argument("--limit", type=int, default=10)
+
+    ps = sub.add_parser("posts", help="TikTok: what goes out next, what was posted")
+    ps.add_argument("--limit", type=int, default=10)
+    ps.add_argument("--days", type=float, default=2, help="history to show (default 2)")
+    po = sub.add_parser("post", help="run the 24/7 poster")
+    po.add_argument("--once", action="store_true",
+                    help="folder mode: top up to_post/ now; upload-post mode: post the next "
+                         "clip now (ignores the schedule), wait for TikTok")
+    po.add_argument("--clip", help="upload-post --once: this clip instead (path as `posts` shows it)")
+    po.add_argument("--private", action="store_true",
+                    help="upload-post --once: only you can see it on TikTok (SELF_ONLY)")
+    sk = sub.add_parser("skip", help="never post these clips")
+    sk.add_argument("clips", nargs="+",
+                    help="paths as `gta-shorts posts` shows them, or file names in to_post/")
     return p
 
 
 COMMANDS = {"doctor": cmd_doctor, "discover": cmd_discover, "vods": cmd_vods,
             "plan": cmd_plan, "clip": cmd_clip, "scan": cmd_scan, "watch": cmd_watch,
-            "status": cmd_status}
+            "status": cmd_status, "posts": cmd_posts, "post": cmd_post, "skip": cmd_skip}
 
 
 def main(argv=None) -> int:

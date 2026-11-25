@@ -1,27 +1,36 @@
-# The 24/7 watcher, next to openshorts. Start both with scripts/up.sh.
-#   logs:    docker compose logs -f watcher
+# The 24/7 watcher and poster, next to openshorts. Start them with scripts/up.sh.
+#   logs:    docker compose logs -f watcher     (or poster)
 #   status:  docker compose exec watcher gta-shorts -c /data/config.toml status
 name: gta-shorts
 
+x-app: &app
+  image: gta-shorts:local
+  init: true                       # forwards docker stop's SIGTERM
+  restart: unless-stopped          # back after crashes and reboots
+  user: "${UID_GID:-1000:1000}"    # files in runs/ stay yours (scripts/up.sh sets it)
+  env_file: .env                   # TWITCH_CLIENT_ID / _SECRET, UPLOAD_POST_API_KEY
+  volumes:
+    - ./config.toml:/data/config.toml:ro
+    - ./runs:/data/runs
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+
 services:
   watcher:
+    <<: *app
     build: .
-    image: gta-shorts:local
     container_name: gta-shorts-watcher
-    init: true                       # forwards docker stop's SIGTERM
-    restart: unless-stopped          # back after crashes and reboots
-    user: "${UID_GID:-1000:1000}"    # files in runs/ stay yours (scripts/up.sh sets it)
-    env_file: .env                   # TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET
     environment:
       GTA_SHORTS_API_URL: http://backend:8000
-    volumes:
-      - ./config.toml:/data/config.toml:ro
-      - ./runs:/data/runs
     networks: [openshorts]
-    stop_grace_period: 30s
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "5"}
+
+  poster:                          # phase 3: [post] in config.toml
+    <<: *app
+    pull_policy: never             # the watcher's build makes the image
+    container_name: gta-shorts-poster
+    command: ["post"]
 
 networks:
   openshorts:                        # created by openshorts' own compose project

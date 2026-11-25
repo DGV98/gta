@@ -13,7 +13,11 @@ min_viewer_clips = 2      # a stretch with fewer viewer clips is not worth a job
 
 [openshorts]
 api_url = "http://localhost:8000"
-layouts = ["auto"]        # Gemini picks per video: facecam stacked under gameplay for streams
+# "screencast": gameplay on top, the webcam found in its corner shown big
+# underneath (openshorts' camera-inset layout); shots it can't stack keep the
+# full width, so the facecam is never cropped. "auto" lets Gemini pick, and for
+# gameplay it picks a centre crop that cuts a side facecam in half.
+layouts = ["screencast"]
 auto_hook = true          # burn the hook text over the first seconds
 captions = true
 # clip_min_seconds = 15   # openshorts default band is 15-60 s

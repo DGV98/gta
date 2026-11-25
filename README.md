@@ -10,10 +10,10 @@ watcher (every 30 min): top GTA VI streams + your priority channels
    ▼
 hot stretches (12 min each) ──> queue in runs/state.db (priority first, then views,
    │                                within a daily stretch + Gemini $ cap)
-   │  yt-dlp, only that range (~65 MB/min)
+   │  only the HLS segments covering that range (~60 MB/min)
    ▼
 openshorts (GPU, Docker): transcribe → Gemini picks moments
-   → 9:16 facecam layout → captions + hook
+   → 9:16: gameplay on top, webcam below → captions + hook
    │
    ▼
 runs/<date>_<streamer>_<vod>/manifest.json + clipNN.mp4
@@ -119,15 +119,21 @@ cost). Interrupted? Re-run the same command; it resumes.
 
 | Check | Knob if it's wrong |
 |---|---|
-| Facecam stacked under gameplay, not a blurred crop | `layouts` in config.toml (`["auto"]` lets Gemini pick) |
+| Facecam stacked under gameplay, not a blurred crop | `layouts = ["screencast"]` in config.toml (`["auto"]` crops gameplay through a side facecam) |
 | Clips open on the action/reaction, end after the payoff | `[detail]` in `deploy/gta6_profile.txt` |
 | The picked moments are the ones you'd post | `[score]` in the profile; `stretch_minutes` / `min_viewer_clips` |
 | Hooks name what happens, no generic filler | hook rules in `[detail]` |
 | Captions readable, not covering the facecam | dashboard caption styles; tell me what you see |
-| Time per 12-min stretch on the GPU, Gemini cost | `TRANSCRIBE_BACKEND=parakeet` in openshorts/.env |
+| Time per 12-min stretch on the GPU, Gemini cost | `TRANSCRIBE_BACKEND=parakeet`, `GEMINI_MODEL` in openshorts/.env |
 
-After editing the profile: `cp deploy/gta6_profile.txt openshorts/profiles/gta6.txt`.
-Each job reads it fresh, so no restart is needed.
+After editing the profile or openshorts/.env, run `scripts/up.sh`: the backend
+runs the copy of the profile built into its image, so it needs the rebuild.
+
+`HOOK_GROUNDING=0` (in openshorts/.env) keeps the hooks the clip picker writes
+under the profile's rules. With it on, openshorts rewrites the hook of every
+stacked clip from three frames, with a prompt meant for screen recordings: on a
+GTA stream that turned "Chat drama put a hit on him 💀" into "Checking Randy's
+location on the GTA map menu after 3,000".
 
 ## Phase 2: the 24/7 watcher
 

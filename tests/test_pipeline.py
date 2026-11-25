@@ -67,7 +67,7 @@ def test_wait_streams_logs_and_raises_jobfailed():
 
 
 def test_config_process_options_only_sends_what_is_set():
-    assert Config().process_options() == {"layouts": ["auto"], "auto_hook": True}
+    assert Config().process_options() == {"layouts": ["screencast"], "auto_hook": True}
     opts = Config(captions=False, target_clips=4, clip_max_seconds=45).process_options()
     assert opts["captions"] is False and opts["target_clips"] == 4 and opts["clip_max_seconds"] == 45
 

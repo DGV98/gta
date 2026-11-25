@@ -116,6 +116,11 @@ def clip_vod(cfg: Config, vod: Vod, stretches: List[Stretch], api: OpenShorts, *
         try:
             if not entry.get("job_id"):
                 src = sdir / entry["source"] if entry.get("source") else None
+                secs = entry.get("source_seconds")
+                if src is not None and src.exists() and secs is not None and secs < st.length / 2:
+                    # e.g. the empty files an older downloader left: fetch it again
+                    log(f"{label}: {src.name} has only {secs:.0f} s of {st.length:.0f}; downloading again")
+                    src.unlink()
                 if src is None or not src.exists():
                     log(f"{label}: downloading ({st.clips} viewer clip(s) inside)...")
                     src = downloader(vod.url, st.start, st.end, sdir, max_height=cfg.max_height)

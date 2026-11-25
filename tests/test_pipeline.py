@@ -115,13 +115,26 @@ def test_interrupted_wait_resumes_the_same_job(cfg):
 def test_failed_job_is_resubmitted_from_the_kept_source(cfg):
     dl = FakeDownloader()
     m = clip_vod(cfg, VOD, [ST], _api(FakeOpenShorts(fail=True)), log=lambda s: None,
-                 downloader=dl, probe=lambda p: 1.0)
+                 downloader=dl, probe=lambda p: 719.0)
     s = m["stretches"][0]
     assert s["status"] == "failed" and "job_id" not in s and s["failed_job_id"] == "job1"
     fake = FakeOpenShorts()
-    m = clip_vod(cfg, VOD, [ST], _api(fake), log=lambda s: None, downloader=dl, probe=lambda p: 1.0)
+    m = clip_vod(cfg, VOD, [ST], _api(fake), log=lambda s: None, downloader=dl, probe=lambda p: 719.0)
     assert m["stretches"][0]["status"] == "done"
     assert len(dl.calls) == 1 and len(fake.processed) == 1    # reused the download
+
+
+def test_a_kept_source_much_shorter_than_the_stretch_is_downloaded_again(cfg):
+    # What the old downloader left on fMP4 VODs: a 261-byte mp4, source_seconds 0.
+    dl = FakeDownloader()
+    clip_vod(cfg, VOD, [ST], _api(FakeOpenShorts(fail=True)), log=lambda s: None,
+             downloader=dl, probe=lambda p: 0.0)
+    lines = []
+    m = clip_vod(cfg, VOD, [ST], _api(FakeOpenShorts()), log=lines.append, downloader=dl,
+                 probe=lambda p: 719.0)
+    assert len(dl.calls) == 2 and m["stretches"][0]["status"] == "done"
+    assert m["stretches"][0]["source_seconds"] == 719.0
+    assert any("has only 0 s of 720; downloading again" in l for l in lines)
 
 
 def test_clip_entry_adds_credit_and_vod_time():

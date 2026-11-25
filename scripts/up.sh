@@ -10,6 +10,10 @@ done
 # Docker would create a missing bind-mount dir as root; the watcher runs as you.
 mkdir -p runs
 cp deploy/gta6_profile.txt openshorts/profiles/gta6.txt
+# GPU setup (setup_openshorts.sh --gpu installed an override): keep it current.
+if [[ -f openshorts/docker-compose.override.yml ]]; then
+    cp deploy/docker-compose.override.gpu.yml openshorts/docker-compose.override.yml
+fi
 
 (cd openshorts && docker compose up -d --build backend frontend)
 

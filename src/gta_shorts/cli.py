@@ -99,7 +99,8 @@ def cmd_doctor(cfg, args) -> int:
             check("Twitch API", False, str(e))
     api = OpenShorts(cfg.api_url)
     check(f"openshorts at {cfg.api_url}", api.healthy(),
-          "cd openshorts && docker compose up -d; first build takes a while")
+          "run scripts/up.sh; the first build takes a while. Still failing: "
+          "cd openshorts && docker compose logs --tail 30 backend")
     if cfg.post_mode == "upload-post" or cfg.upload_post_api_key:
         check("UPLOAD_POST_API_KEY set", bool(cfg.upload_post_api_key),
               "app.upload-post.com -> API Keys; put it in .env")

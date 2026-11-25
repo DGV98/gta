@@ -1,13 +1,26 @@
 # Installed as openshorts/docker-compose.override.yml by
-# `scripts/setup_openshorts.sh --gpu` (compose picks it up automatically).
+# `scripts/setup_openshorts.sh --gpu` (compose picks it up automatically;
+# scripts/up.sh refreshes it).
 # GPU: "1" adds cuBLAS/cuDNN + onnxruntime-gpu to the image; the `video`
 # capability is what NVENC needs. Works with Docker Desktop on WSL2.
+#
+# volumes: upstream mounts the whole checkout over /app (a dev setup for live
+# code edits). The image runs as appuser (uid 999), and on a Linux disk such as
+# WSL's that uid can't write to your checkout, so the backend died at startup
+# with "Permission denied: 'uploads'". Without that mount it runs the copy built
+# into the image (our patches and the GTA profile included: up.sh rebuilds it),
+# and named volumes keep its output and model downloads across rebuilds.
+# env_file: the app read openshorts/.env through that mount; now it comes in here.
 services:
   backend:
     build:
       context: .
       args:
         GPU: "1"
+    env_file: .env
+    volumes: !override
+      - output:/app/output
+      - model-cache:/app/.cache
     deploy:
       resources:
         reservations:
@@ -15,3 +28,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu, video]
+
+volumes:
+  output:
+  model-cache:

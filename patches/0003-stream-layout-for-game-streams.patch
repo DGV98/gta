@@ -1,0 +1,252 @@
+diff --git a/app.py b/app.py
+index d272167..d596201 100644
+--- a/app.py
++++ b/app.py
+@@ -5832,6 +5832,7 @@ LAYOUT_ENV = {
+     "screencast": "SCREENCAST_LAYOUT",  # slides/screen share over the speaker
+     "speaker_cut": "SPEAKER_CUT",     # hard cuts to whoever is talking
+     "punch_in": "PUNCH_IN",           # small push on the clip's beats
++    "stream": "STREAM_LAYOUT",        # game stream: whole frame, webcam stacked below, no crops
+ }
+ 
+ # Stacking and cutting both need to know who is speaking.
+diff --git a/reframe_v2.py b/reframe_v2.py
+index 4211156..1601da0 100644
+--- a/reframe_v2.py
++++ b/reframe_v2.py
+@@ -78,6 +78,42 @@ def source_already_fits(orig_w, orig_h, aspect_ratio, tol=0.01):
+     return orig_w / float(orig_h) <= aspect_ratio * (1 + tol)
+ 
+ 
++def stream_layout_enabled():
++    """STREAM_LAYOUT=1, set per job by ``layouts=["stream"]``: a game stream.
++
++    The classifier frames gameplay badly in both of its answers. GENERAL keeps
++    a centre strip and crops ~24% off the sides, which is where streamers put
++    their webcam. TRACK follows a face, and in a modern game the characters ARE
++    faces: on GTA VI it followed Lucia across a cutscene and cut the streamer's
++    overlay out of the frame. The screencast route fixes the webcam case but
++    asks Gemini about every shot, and when that check fails (quota, outage) its
++    fallback leaves the TRACK verdicts in place. Read at call time so a job's
++    environment (or a test) decides.
++    """
++    return os.environ.get("STREAM_LAYOUT", "0").strip() == "1"
++
++
++def stream_strategies(scene_boundaries, inset, present):
++    """Per-scene layouts for a stream: INSET (the whole frame on top, the webcam
++    enlarged below) where the corner webcam ``inset`` is in the scene, WIDE (the
++    whole frame) everywhere else. Never TRACK or GENERAL, so nothing at the
++    sides is ever cropped away: a streamer without a webcam (an avatar, a
++    PNGTuber) keeps their overlay in the full frame.
++
++    ``present(start_f, end_f)`` says whether the inset shows in that scene.
++    Returns ``(strategies, insets)``, insets keyed by scene start frame like
++    the screencast route's.
++    """
++    strategies, insets = [], {}
++    for start_f, end_f in scene_boundaries:
++        if inset and present(start_f, end_f):
++            strategies.append('INSET')
++            insets[start_f] = inset
++        else:
++            strategies.append('WIDE')
++    return strategies, insets
++
++
+ def dedupe_sendcmd_lines(xs, fps, target="crop@c"):
+     """sendcmd lines setting crop x per frame, deduped to change-points.
+ 
+@@ -687,6 +723,8 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
+     # whole frame into the middle of a blurred copy of itself. Skip the
+     # classifier and every layout upgrade instead of trying to survive them.
+     passthrough = source_already_fits(orig_w, orig_h, aspect_ratio)
++    # The editor's explicit framing and a vertical source both beat it.
++    stream = not force_strategy and not passthrough and stream_layout_enabled()
+     if force_strategy:
+         strategies = [force_strategy] * len(scenes)
+         content_ranges = []  # no screencast/inset upgrades over an explicit choice
+@@ -696,6 +734,13 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
+         content_ranges = []
+         print(f"   ↕️  Source is already {orig_w}x{orig_h} vertical — "
+               f"passing it through, no reframe")
++    elif stream:
++        # No face classifier and no per-shot Gemini check: each scene is
++        # settled below, from the webcam box alone (stream_strategies).
++        strategies = ['WIDE'] * len(scenes)
++        content_ranges = []
++        print("   🎮 Stream layout: the whole frame, the webcam stacked under it "
++              "where there is one")
+     else:
+         strategies = m.analyze_scenes_strategy(input_video, scenes)
+         if not content_ranges and screencast_layout.ENABLED:
+@@ -708,7 +753,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
+     # that begin past the last decoded frame, and those get dropped).
+     splits = {}
+     split_scene_of = {}
+-    detected_splits = {} if passthrough else split_layout.detect_split_scenes(
++    detected_splits = {} if passthrough or stream else split_layout.detect_split_scenes(
+         input_video, scenes, strategies)
+     for scene_idx, centres in detected_splits.items():
+         strategies[scene_idx] = 'SPLIT'
+@@ -800,6 +845,22 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
+                                       start_f, end_f, centre)
+                 if crop:
+                     focus_crops[start_f] = crop
++    if stream:
++        # Same geometric detector as the screencast route, without its Gemini
++        # gate: in a stream the webcam is always the corner overlay. WIDE here
++        # gets no focus crop, so its scenes show the frame edge to edge.
++        try:
++            inset = camera_inset.detect(input_video)
++        except Exception as e:
++            inset = None
++            print(f"   ⚠️ Webcam check failed ({e}) — the whole frame everywhere.")
++        if inset:
++            print(f"   📹 Webcam inset at {inset}")
++        strategies, insets = stream_strategies(
++            scene_boundaries, inset,
++            lambda s, e: camera_inset.present_in_scene(input_video, inset, s, e))
++        inset_count = len(insets)
++        wide_count = len(strategies) - inset_count
+     if screencasts:
+         print(f"   🖥️ SCREENCAST layout on {len(screencasts)} scene(s)")
+     if wide_count:
+diff --git a/tests/test_stream_layout.py b/tests/test_stream_layout.py
+new file mode 100644
+index 0000000..ad10e7a
+--- /dev/null
++++ b/tests/test_stream_layout.py
+@@ -0,0 +1,132 @@
++"""STREAM_LAYOUT=1 (layouts=["stream"]): game-stream VODs never get cropped.
++
++On GTA VI streams the classifier's TRACK followed in-game characters and cut
++the streamer's corner overlay out of the frame, and GENERAL's centre strip cut
++a side webcam in half. The stream layout settles every scene from the webcam
++box alone: INSET where it shows, WIDE (the whole frame) everywhere else.
++"""
++import sys
++import types
++
++import pytest
++
++import reframe_v2
++from reframe_v2 import stream_layout_enabled, stream_strategies
++
++
++class FT:
++    """Stand-in for scenedetect's FrameTimecode."""
++
++    def __init__(self, frames):
++        self.frames = frames
++
++    def get_frames(self):
++        return self.frames
++
++
++class _Stop(Exception):
++    pass
++
++
++BOX = (0, 364, 281, 158)
++
++
++class TestStreamStrategies:
++    def test_inset_where_the_webcam_shows_whole_frame_elsewhere(self):
++        strategies, insets = stream_strategies(
++            [(0, 90), (90, 300), (300, 400)], BOX, lambda s, e: s != 90)
++        assert strategies == ['INSET', 'WIDE', 'INSET']
++        assert insets == {0: BOX, 300: BOX}
++
++    def test_no_webcam_means_the_whole_frame_and_no_presence_checks(self):
++        def present(s, e):
++            raise AssertionError("nothing to look for")
++        strategies, insets = stream_strategies([(0, 90), (90, 300)], None, present)
++        assert strategies == ['WIDE', 'WIDE'] and insets == {}
++
++    def test_never_a_cropping_layout(self):
++        for inset in (BOX, None):
++            for shows in (True, False):
++                strategies, _ = stream_strategies(
++                    [(0, 10), (10, 20)], inset, lambda s, e: shows)
++                assert set(strategies) <= {'INSET', 'WIDE'}
++
++
++class TestEnabled:
++    def test_off_unless_set_to_one(self, monkeypatch):
++        monkeypatch.delenv("STREAM_LAYOUT", raising=False)
++        assert not stream_layout_enabled()
++        monkeypatch.setenv("STREAM_LAYOUT", "0")
++        assert not stream_layout_enabled()
++        monkeypatch.setenv("STREAM_LAYOUT", "1")
++        assert stream_layout_enabled()
++
++
++@pytest.fixture
++def fake_main(monkeypatch):
++    """A `main` with just what render() touches before the trajectory pass."""
++    m = types.ModuleType("main")
++    m.detect_scenes = lambda path: ([(FT(0), FT(90)), (FT(90), FT(300))], 30.0)
++    m.get_video_resolution = lambda path: (1920, 1080)
++    m.calls = []
++    m.analyze_scenes_strategy = lambda path, scenes: m.calls.append("classifier") or ['TRACK', 'GENERAL']
++    m.SmoothedCameraman = lambda *a, **k: types.SimpleNamespace(crop_width=608, crop_height=1080)
++    m.SpeakerTracker = lambda **k: object()
++    monkeypatch.setitem(sys.modules, "main", m)
++    return m
++
++
++def _routed(monkeypatch, *, inset, shows, force=None):
++    """Run render() up to the trajectory pass; return the strategies it routed."""
++    seen = {}
++
++    def stop(video, boundaries, strategies, *a, **k):
++        seen["strategies"] = list(strategies)
++        raise _Stop()
++
++    monkeypatch.setattr(reframe_v2, "_analyze_trajectory", stop)
++    monkeypatch.setattr(reframe_v2.camera_inset, "detect", lambda path: inset)
++    monkeypatch.setattr(reframe_v2.camera_inset, "present_in_scene",
++                        lambda video, box, s, e: shows(s))
++    # The stream route skips the split check; an editor override keeps
++    # upstream's behaviour (it runs, finding nothing here).
++    monkeypatch.setattr(reframe_v2.split_layout, "detect_split_scenes",
++                        (lambda *a: {}) if force else
++                        (lambda *a: (_ for _ in ()).throw(AssertionError("no split check"))))
++    monkeypatch.setattr(reframe_v2.screencast_layout, "detect_content_ranges",
++                        lambda *a: (_ for _ in ()).throw(AssertionError("no Gemini shot check")))
++    with pytest.raises(_Stop):
++        reframe_v2.render("clip.mp4", "out.mp4", 9 / 16, force_strategy=force)
++    return seen["strategies"]
++
++
++class TestRenderRouting:
++    def test_webcam_scenes_stack_the_rest_keep_the_whole_frame(self, monkeypatch, fake_main):
++        monkeypatch.setenv("STREAM_LAYOUT", "1")
++        assert _routed(monkeypatch, inset=BOX, shows=lambda s: s == 0) == ['INSET', 'WIDE']
++        assert fake_main.calls == []          # the face classifier never ran
++
++    def test_no_webcam_is_the_whole_frame_in_every_scene(self, monkeypatch, fake_main):
++        monkeypatch.setenv("STREAM_LAYOUT", "1")
++        assert _routed(monkeypatch, inset=None, shows=lambda s: True) == ['WIDE', 'WIDE']
++
++    def test_an_editor_framing_override_still_wins(self, monkeypatch, fake_main):
++        monkeypatch.setenv("STREAM_LAYOUT", "1")
++        assert _routed(monkeypatch, inset=BOX, shows=lambda s: True,
++                       force='TRACK') == ['TRACK', 'TRACK']
++
++    def test_without_the_flag_the_classifier_decides_as_before(self, monkeypatch, fake_main):
++        monkeypatch.delenv("STREAM_LAYOUT", raising=False)
++        monkeypatch.setattr(reframe_v2.screencast_layout, "ENABLED", False)
++        monkeypatch.setattr(reframe_v2, "_analyze_trajectory",
++                            lambda *a, **k: (_ for _ in ()).throw(_Stop()))
++        monkeypatch.setattr(reframe_v2.split_layout, "detect_split_scenes", lambda *a: {})
++        with pytest.raises(_Stop):
++            reframe_v2.render("clip.mp4", "out.mp4", 9 / 16)
++        assert fake_main.calls == ["classifier"]
++
++
++class TestLayoutEnvStream:
++    def test_stream_switches_the_layout_on_for_the_job(self):
++        app_module = pytest.importorskip("app")
++        assert app_module.layout_env(["stream"]) == {"STREAM_LAYOUT": "1"}

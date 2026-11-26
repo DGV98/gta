@@ -33,7 +33,10 @@ poster: the best clips ──> runs/to_post/ + captions, you upload them by hand
 ## What is patched in openshorts
 
 Pinned to `deploy/openshorts.pin`; `scripts/setup_openshorts.sh` clones it and
-applies `patches/`. Upstream's own test suite passes with both patches.
+applies `patches/`. Upstream's own test suite passes with all three patches
+(2589 passed, 43 skipped). After a patch changes, re-run
+`scripts/setup_openshorts.sh --gpu` before `scripts/up.sh`: up.sh rebuilds the
+image from the checkout but does not re-apply patches.
 
 1. **Clip profile** (`0001`): `CLIP_PROFILE_FILE` adds deployment guidance to
    the prompts openshorts actually uses (score, detail, vision). Ours is
@@ -45,6 +48,14 @@ applies `patches/`. Upstream's own test suite passes with both patches.
    `twitch_vod_url` + `twitch_vod_offset` to `/api/process` so the job still
    gets the viewer-clip "heat" signal (the strongest hint for loud,
    low-dialogue GTA moments).
+3. **Stream layout** (`0003`): `layouts=["stream"]` frames every scene from the
+   webcam box alone: the whole frame on top with the corner webcam enlarged
+   below where it is found, the whole frame everywhere else. Never a crop.
+   Upstream's classifier crops gameplay through the middle (cutting a side
+   facecam in half) or follows a face, and in GTA VI the characters are faces:
+   it followed Lucia across a cutscene and cut theburntpeanut's avatar out.
+   Its screencast route stacks the webcam too, but asks Gemini about every
+   shot and falls back to those crops when that call fails.
 
 ## Setup on the Windows GPU machine
 
@@ -119,7 +130,7 @@ cost). Interrupted? Re-run the same command; it resumes.
 
 | Check | Knob if it's wrong |
 |---|---|
-| Facecam stacked under gameplay, not a blurred crop | `layouts = ["screencast"]` in config.toml (`["auto"]` crops gameplay through a side facecam) |
+| Facecam stacked under gameplay, nothing cropped | `layouts = ["stream"]` in config.toml (patch 0003) |
 | Clips open on the action/reaction, end after the payoff | `[detail]` in `deploy/gta6_profile.txt` |
 | The picked moments are the ones you'd post | `[score]` in the profile; `stretch_minutes` / `min_viewer_clips` |
 | Hooks name what happens, no generic filler | hook rules in `[detail]` |

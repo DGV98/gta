@@ -13,11 +13,13 @@ min_viewer_clips = 2      # a stretch with fewer viewer clips is not worth a job
 
 [openshorts]
 api_url = "http://localhost:8000"
-# "screencast": gameplay on top, the webcam found in its corner shown big
-# underneath (openshorts' camera-inset layout); shots it can't stack keep the
-# full width, so the facecam is never cropped. "auto" lets Gemini pick, and for
-# gameplay it picks a centre crop that cuts a side facecam in half.
-layouts = ["screencast"]
+# "stream" (patch 0003): every scene shows the whole stream frame; where a
+# corner webcam is found it is stacked big underneath. Never a crop, so a side
+# facecam or a PNG avatar is never cut off, and no Gemini calls for layout.
+# "screencast" also stacks the webcam, but asks Gemini about every shot and
+# falls back to crops that follow game characters' faces. "auto" crops
+# gameplay through the middle and cuts a side facecam in half.
+layouts = ["stream"]
 auto_hook = true          # burn the hook text over the first seconds
 captions = true
 # clip_min_seconds = 15   # openshorts default band is 15-60 s

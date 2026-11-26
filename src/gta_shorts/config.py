@@ -22,7 +22,7 @@ class Config:
     min_viewer_clips: int = 2
     # [openshorts]
     api_url: str = "http://localhost:8000"
-    layouts: List[str] = field(default_factory=lambda: ["screencast"])   # see config.example.toml
+    layouts: List[str] = field(default_factory=lambda: ["stream"])   # see config.example.toml
     auto_hook: bool = True
     auto_hook_style: Optional[str] = None
     captions: bool = True
